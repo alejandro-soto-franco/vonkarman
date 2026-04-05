@@ -1,0 +1,12 @@
+[package]
+name = "vonkarman-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types and traits for the vonkarman Navier-Stokes solver"
+
+[dependencies]
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }

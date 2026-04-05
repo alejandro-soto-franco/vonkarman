@@ -1,0 +1,13 @@
+[package]
+name = "vonkarman-periodic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Periodic 3D pseudospectral Navier-Stokes solver"
+
+[dependencies]
+vonkarman-core = { workspace = true }
+vonkarman-fft = { workspace = true }
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+rayon = { workspace = true }
