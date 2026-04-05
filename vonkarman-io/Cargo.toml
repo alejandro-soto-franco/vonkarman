@@ -1,0 +1,12 @@
+[package]
+name = "vonkarman-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HDF5 snapshots and I/O for the vonkarman solver"
+
+[dependencies]
+vonkarman-core = { workspace = true }
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+hdf5 = { package = "hdf5-metno", version = "0.12" }

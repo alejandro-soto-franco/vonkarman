@@ -4,6 +4,7 @@ members = [
     "vonkarman-fft",
     "vonkarman-periodic",
     "vonkarman-diag",
+    "vonkarman-io",
     "vonkarman-bin",
 ]
 resolver = "2"
@@ -19,6 +20,7 @@ vonkarman-core = { path = "vonkarman-core" }
 vonkarman-fft = { path = "vonkarman-fft" }
 vonkarman-periodic = { path = "vonkarman-periodic" }
 vonkarman-diag = { path = "vonkarman-diag" }
+vonkarman-io = { path = "vonkarman-io" }
 ndarray = { version = "0.16", features = ["rayon"] }
 num-complex = "0.4"
 rayon = "1.10"
