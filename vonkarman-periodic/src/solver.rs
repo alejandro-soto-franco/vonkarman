@@ -40,11 +40,21 @@ impl Periodic3D {
         let (snx, sny, snz) = grid.spectral_shape();
         let shape = (snx, sny, snz);
 
+        // FFT backends (needed before IC generation for random_isotropic)
+        let fft = NdrustfftBackend::new(grid.nx, grid.ny, grid.nz);
+
         // Generate physical-space IC and transform to spectral
         let velocity = match ic {
             IcType::TaylorGreen => ic::taylor_green::<f64>(&grid),
+            IcType::Abc { a, b, c } => ic::abc_flow::<f64>(&grid, a, b, c),
+            IcType::AntiParallelTubes { circulation, core_radius, separation, perturbation } => {
+                ic::anti_parallel_tubes::<f64>(&grid, circulation, core_radius, separation, perturbation)
+            }
+            IcType::KidaPelz => ic::kida_pelz::<f64>(&grid),
+            IcType::RandomIsotropic { k_peak, energy, seed } => {
+                ic::random_isotropic(&grid, k_peak, energy, seed, &fft)
+            }
         };
-        let fft = NdrustfftBackend::new(grid.nx, grid.ny, grid.nz);
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
             Array3::zeros(shape),
             Array3::zeros(shape),
