@@ -105,6 +105,7 @@ fn write_array3(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_complex::Complex;
     use vonkarman_core::domain::{DomainType, PhysicsParams};
     use vonkarman_core::field::{GridSpec, VectorField};
 
