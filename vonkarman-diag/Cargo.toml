@@ -10,3 +10,6 @@ vonkarman-core = { workspace = true }
 ndarray = { workspace = true }
 num-complex = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+vonkarman-fft = { workspace = true }
