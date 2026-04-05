@@ -11,3 +11,4 @@ vonkarman-fft = { workspace = true }
 ndarray = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }
+serde = { workspace = true }
