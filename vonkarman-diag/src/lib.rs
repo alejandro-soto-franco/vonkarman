@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 pub mod audit;
 pub mod scalar;
 pub mod spectrum;

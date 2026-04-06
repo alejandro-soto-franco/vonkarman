@@ -1,3 +1,6 @@
+// Phase 2+ fields are parsed but not yet consumed by the runner.
+#![allow(dead_code)]
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

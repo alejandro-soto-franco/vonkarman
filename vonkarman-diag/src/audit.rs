@@ -28,6 +28,12 @@ pub struct ConservationAudit {
     pub violations: Vec<Violation>,
 }
 
+impl Default for ConservationAudit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConservationAudit {
     pub fn new() -> Self {
         Self {
@@ -58,14 +64,14 @@ impl ConservationAudit {
         }
 
         // Check energy monotonicity
-        if let Some(prev) = self.prev_energy {
-            if energy > prev + 1e-14 * prev.abs().max(1e-30) {
-                self.violations.push(Violation::EnergyIncrease {
-                    step,
-                    prev,
-                    curr: energy,
-                });
-            }
+        if let Some(prev) = self.prev_energy
+            && energy > prev + 1e-14 * prev.abs().max(1e-30)
+        {
+            self.violations.push(Violation::EnergyIncrease {
+                step,
+                prev,
+                curr: energy,
+            });
         }
         self.prev_energy = Some(energy);
     }

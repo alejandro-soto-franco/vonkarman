@@ -116,7 +116,9 @@ fn write_array3(
     shape: &[usize; 3],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ds = group.new_dataset::<f64>().shape(*shape).create(name)?;
-    ds.write(data)?;
+    // hdf5-metno uses ndarray 0.15 internally, so write via raw slice
+    let slice = data.as_slice().ok_or("array not contiguous")?;
+    ds.write_raw(slice)?;
     Ok(())
 }
 

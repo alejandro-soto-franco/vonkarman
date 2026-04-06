@@ -1,3 +1,6 @@
+// Component iteration (for c in 0..3) is idiomatic in CFD vector field code.
+#![allow(clippy::needless_range_loop)]
+
 pub mod etd;
 pub mod ic;
 pub mod nonlinear;
