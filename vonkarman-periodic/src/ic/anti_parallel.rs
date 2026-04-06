@@ -111,9 +111,7 @@ mod tests {
     #[test]
     fn anti_parallel_finite() {
         let grid = GridSpec::cubic(32, 2.0 * std::f64::consts::PI);
-        let v = anti_parallel_tubes::<f64>(
-            &grid, 1.0, 0.3, 1.0, 0.1,
-        );
+        let v = anti_parallel_tubes::<f64>(&grid, 1.0, 0.3, 1.0, 0.1);
         for c in 0..3 {
             for val in v.data[c].iter() {
                 assert!(val.is_finite(), "non-finite value in component {c}");
@@ -124,9 +122,7 @@ mod tests {
     #[test]
     fn anti_parallel_nonzero_energy() {
         let grid = GridSpec::cubic(32, 2.0 * std::f64::consts::PI);
-        let v = anti_parallel_tubes::<f64>(
-            &grid, 1.0, 0.3, 1.0, 0.1,
-        );
+        let v = anti_parallel_tubes::<f64>(&grid, 1.0, 0.3, 1.0, 0.1);
         let dv = grid.dv();
         let vol = grid.lx * grid.ly * grid.lz;
         let mut energy = 0.0_f64;
@@ -134,8 +130,8 @@ mod tests {
             for j in 0..grid.ny {
                 for k in 0..grid.nz {
                     let u2 = v.x()[[i, j, k]].powi(2)
-                           + v.y()[[i, j, k]].powi(2)
-                           + v.z()[[i, j, k]].powi(2);
+                        + v.y()[[i, j, k]].powi(2)
+                        + v.z()[[i, j, k]].powi(2);
                     energy += u2 * dv;
                 }
             }

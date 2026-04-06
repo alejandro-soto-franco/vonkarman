@@ -1,7 +1,7 @@
-use ndarray::Array3;
-use num_complex::Complex;
-use ndrustfft::{R2cFftHandler, FftHandler, ndfft_r2c, ndifft_r2c, ndfft, ndifft};
 use crate::backend::FftBackend;
+use ndarray::Array3;
+use ndrustfft::{FftHandler, R2cFftHandler, ndfft, ndfft_r2c, ndifft, ndifft_r2c};
+use num_complex::Complex;
 
 /// Pure-Rust CPU FFT backend using ndrustfft.
 ///
@@ -68,9 +68,9 @@ impl FftBackend<f64> for NdrustfftBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::FftBackend;
     use ndarray::Array3;
     use num_complex::Complex;
-    use crate::backend::FftBackend;
 
     #[test]
     fn roundtrip_identity() {
@@ -97,7 +97,8 @@ mod tests {
                     assert!(
                         (output[[i, j, k]] - input[[i, j, k]]).abs() < 1e-12,
                         "mismatch at ({i},{j},{k}): got {}, expected {}",
-                        output[[i, j, k]], input[[i, j, k]]
+                        output[[i, j, k]],
+                        input[[i, j, k]]
                     );
                 }
             }
@@ -130,8 +131,8 @@ mod tests {
         for ix in 0..n {
             for iy in 0..n {
                 for iz in 0..(n / 2 + 1) {
-                    let mag2 = spectral[[ix, iy, iz]].re.powi(2)
-                             + spectral[[ix, iy, iz]].im.powi(2);
+                    let mag2 =
+                        spectral[[ix, iy, iz]].re.powi(2) + spectral[[ix, iy, iz]].im.powi(2);
                     let weight = if iz == 0 || iz == n / 2 { 1.0 } else { 2.0 };
                     spec_energy += weight * mag2;
                 }

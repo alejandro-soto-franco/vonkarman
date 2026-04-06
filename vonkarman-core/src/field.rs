@@ -1,6 +1,6 @@
+use crate::float::Float;
 use ndarray::{Array2, Array3};
 use serde::{Deserialize, Serialize};
-use crate::float::Float;
 
 /// Grid metadata for a 3D periodic domain.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -16,7 +16,14 @@ pub struct GridSpec {
 impl GridSpec {
     /// Create a cubic grid with side length `l` and `n` points per axis.
     pub fn cubic(n: usize, l: f64) -> Self {
-        Self { nx: n, ny: n, nz: n, lx: l, ly: l, lz: l }
+        Self {
+            nx: n,
+            ny: n,
+            nz: n,
+            lx: l,
+            ly: l,
+            lz: l,
+        }
     }
 
     /// Grid spacing (assumes uniform, uses x-direction).
@@ -106,12 +113,24 @@ impl<F: Float> VectorField<F> {
     }
 
     /// Convenience accessors.
-    pub fn x(&self) -> &Array3<F> { &self.data[0] }
-    pub fn y(&self) -> &Array3<F> { &self.data[1] }
-    pub fn z(&self) -> &Array3<F> { &self.data[2] }
-    pub fn x_mut(&mut self) -> &mut Array3<F> { &mut self.data[0] }
-    pub fn y_mut(&mut self) -> &mut Array3<F> { &mut self.data[1] }
-    pub fn z_mut(&mut self) -> &mut Array3<F> { &mut self.data[2] }
+    pub fn x(&self) -> &Array3<F> {
+        &self.data[0]
+    }
+    pub fn y(&self) -> &Array3<F> {
+        &self.data[1]
+    }
+    pub fn z(&self) -> &Array3<F> {
+        &self.data[2]
+    }
+    pub fn x_mut(&mut self) -> &mut Array3<F> {
+        &mut self.data[0]
+    }
+    pub fn y_mut(&mut self) -> &mut Array3<F> {
+        &mut self.data[1]
+    }
+    pub fn z_mut(&mut self) -> &mut Array3<F> {
+        &mut self.data[2]
+    }
 }
 
 /// A 2D scalar field on an axisymmetric (r, z) grid.

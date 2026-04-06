@@ -1,8 +1,8 @@
+use crate::field::{GridSpec, VectorField};
+use crate::float::Float;
 use ndarray::Array3;
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
-use crate::float::Float;
-use crate::field::{GridSpec, VectorField};
 
 /// Which domain topology the solver uses.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -81,9 +81,15 @@ pub struct CommitCycleConfig {
     pub checkpoint_interval: u64,
 }
 
-fn default_one() -> u64 { 1 }
-fn default_snapshot_interval() -> u64 { 1000 }
-fn default_checkpoint_interval() -> u64 { 5000 }
+fn default_one() -> u64 {
+    1
+}
+fn default_snapshot_interval() -> u64 {
+    1000
+}
+fn default_checkpoint_interval() -> u64 {
+    5000
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DiagnosticsConfig {

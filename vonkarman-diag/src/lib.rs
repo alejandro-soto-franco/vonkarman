@@ -1,7 +1,7 @@
-pub mod scalar;
 pub mod audit;
+pub mod scalar;
 pub mod spectrum;
 
-pub use scalar::ScalarDiagnostics;
 pub use audit::{ConservationAudit, Violation};
-pub use spectrum::{energy_spectrum, compensated_spectrum, dissipation_spectrum};
+pub use scalar::ScalarDiagnostics;
+pub use spectrum::{compensated_spectrum, dissipation_spectrum, energy_spectrum};

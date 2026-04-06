@@ -61,14 +61,18 @@ mod tests {
         let (snx, sny, snz) = grid.spectral_shape();
         let shape = (snx, sny, snz);
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
-            Array3::zeros(shape), Array3::zeros(shape), Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
         ];
         for c in 0..3 {
             backend.r2c_3d(&v.data[c], &mut u_hat[c]);
         }
 
         let mut n_hat: [Array3<Complex<f64>>; 3] = [
-            Array3::zeros(shape), Array3::zeros(shape), Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
         ];
         compute_nonlinear(&ops, &backend, &padded_backend, &grid, &u_hat, &mut n_hat);
 
@@ -80,11 +84,11 @@ mod tests {
                 for iz in 0..snz {
                     let kz = ops.kz[iz];
                     let div_re = kx * n_hat[0][[ix, iy, iz]].re
-                               + ky * n_hat[1][[ix, iy, iz]].re
-                               + kz * n_hat[2][[ix, iy, iz]].re;
+                        + ky * n_hat[1][[ix, iy, iz]].re
+                        + kz * n_hat[2][[ix, iy, iz]].re;
                     let div_im = kx * n_hat[0][[ix, iy, iz]].im
-                               + ky * n_hat[1][[ix, iy, iz]].im
-                               + kz * n_hat[2][[ix, iy, iz]].im;
+                        + ky * n_hat[1][[ix, iy, iz]].im
+                        + kz * n_hat[2][[ix, iy, iz]].im;
                     let mag = (div_re * div_re + div_im * div_im).sqrt();
                     assert!(mag < 1e-6, "divergence at ({ix},{iy},{iz}) = {mag}");
                 }

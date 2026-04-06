@@ -155,22 +155,30 @@ mod tests {
     fn phi1_known_value() {
         let p = phi1(1.0);
         let expected = std::f64::consts::E - 1.0;
-        assert!((p - expected).abs() < 1e-10, "phi1(1) = {p}, expected {expected}");
+        assert!(
+            (p - expected).abs() < 1e-10,
+            "phi1(1) = {p}, expected {expected}"
+        );
     }
 
     #[test]
     fn phi2_known_value() {
         let p = phi2(1.0);
         let expected = std::f64::consts::E - 2.0;
-        assert!((p - expected).abs() < 1e-10, "phi2(1) = {p}, expected {expected}");
+        assert!(
+            (p - expected).abs() < 1e-10,
+            "phi2(1) = {p}, expected {expected}"
+        );
     }
 
     #[test]
     fn phi1_large_negative() {
         let p = phi1(-100.0);
         let expected = ((-100.0_f64).exp() - 1.0) / (-100.0);
-        assert!((p - expected).abs() / expected.abs() < 1e-8,
-            "phi1(-100) = {p}, expected {expected}");
+        assert!(
+            (p - expected).abs() / expected.abs() < 1e-8,
+            "phi1(-100) = {p}, expected {expected}"
+        );
     }
 
     #[test]
@@ -178,10 +186,14 @@ mod tests {
         for &z in &[1e-10, 1e-8, 1e-6, 1e-4, 1e-2] {
             let p1 = phi1(z);
             let p2 = phi2(z);
-            assert!((p1 - 1.0).abs() < z.abs() * 2.0,
-                "phi1({z}) = {p1} not close to 1");
-            assert!((p2 - 0.5).abs() < z.abs() * 2.0,
-                "phi2({z}) = {p2} not close to 0.5");
+            assert!(
+                (p1 - 1.0).abs() < z.abs() * 2.0,
+                "phi1({z}) = {p1} not close to 1"
+            );
+            assert!(
+                (p2 - 0.5).abs() < z.abs() * 2.0,
+                "phi2({z}) = {p2} not close to 0.5"
+            );
         }
     }
 
@@ -194,6 +206,9 @@ mod tests {
         assert!((c.exp_half - 1.0).abs() < 1e-12);
         // b1 + 2*b23 + b4 = 1 (consistency: sum of weights = phi1)
         let sum = c.b1 + 2.0 * c.b23 + c.b4;
-        assert!((sum - 1.0).abs() < 1e-10, "weight sum = {sum}, expected 1.0");
+        assert!(
+            (sum - 1.0).abs() < 1e-10,
+            "weight sum = {sum}, expected 1.0"
+        );
     }
 }

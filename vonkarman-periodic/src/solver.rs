@@ -1,12 +1,12 @@
+use crate::etd::EtdCoeffs;
+use crate::ic::{self, IcType};
+use crate::nonlinear::compute_nonlinear;
 use ndarray::Array3;
 use num_complex::Complex;
 use vonkarman_core::domain::{Domain, DomainType, PhysicsParams, Snapshot};
 use vonkarman_core::field::{GridSpec, VectorField};
 use vonkarman_core::spectral_ops::SpectralOps;
 use vonkarman_fft::{FftBackend, NdrustfftBackend};
-use crate::etd::EtdCoeffs;
-use crate::ic::{self, IcType};
-use crate::nonlinear::compute_nonlinear;
 
 /// 3D pseudospectral Navier-Stokes solver on the periodic torus T^3.
 pub struct Periodic3D {
@@ -47,13 +47,24 @@ impl Periodic3D {
         let velocity = match ic {
             IcType::TaylorGreen => ic::taylor_green::<f64>(&grid),
             IcType::Abc { a, b, c } => ic::abc_flow::<f64>(&grid, a, b, c),
-            IcType::AntiParallelTubes { circulation, core_radius, separation, perturbation } => {
-                ic::anti_parallel_tubes::<f64>(&grid, circulation, core_radius, separation, perturbation)
-            }
+            IcType::AntiParallelTubes {
+                circulation,
+                core_radius,
+                separation,
+                perturbation,
+            } => ic::anti_parallel_tubes::<f64>(
+                &grid,
+                circulation,
+                core_radius,
+                separation,
+                perturbation,
+            ),
             IcType::KidaPelz => ic::kida_pelz::<f64>(&grid),
-            IcType::RandomIsotropic { k_peak, energy, seed } => {
-                ic::random_isotropic(&grid, k_peak, energy, seed, &fft)
-            }
+            IcType::RandomIsotropic {
+                k_peak,
+                energy,
+                seed,
+            } => ic::random_isotropic(&grid, k_peak, energy, seed, &fft),
         };
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
             Array3::zeros(shape),
@@ -68,7 +79,11 @@ impl Periodic3D {
         let fft_padded = NdrustfftBackend::new(pg.nx, pg.ny, pg.nz);
 
         let re = if nu > 0.0 { 1.0 / nu } else { f64::INFINITY };
-        let params = PhysicsParams { nu, re, domain: DomainType::Periodic3D };
+        let params = PhysicsParams {
+            nu,
+            re,
+            domain: DomainType::Periodic3D,
+        };
 
         // Initial dt from CFL
         let cfl_safety = 0.5;
@@ -133,9 +148,9 @@ impl Periodic3D {
             for j in 0..grid.ny {
                 for k in 0..grid.nz {
                     let speed = (u_phys[0][[i, j, k]].powi(2)
-                               + u_phys[1][[i, j, k]].powi(2)
-                               + u_phys[2][[i, j, k]].powi(2))
-                        .sqrt();
+                        + u_phys[1][[i, j, k]].powi(2)
+                        + u_phys[2][[i, j, k]].powi(2))
+                    .sqrt();
                     u_max = u_max.max(speed);
                 }
             }
@@ -143,7 +158,11 @@ impl Periodic3D {
 
         let dx = grid.dx();
         let advective = if u_max > 1e-30 { dx / u_max } else { 1.0 };
-        let viscous = if nu > 1e-30 { dx * dx / nu } else { f64::INFINITY };
+        let viscous = if nu > 1e-30 {
+            dx * dx / nu
+        } else {
+            f64::INFINITY
+        };
         safety * advective.min(viscous).min(0.1) // cap at 0.1
     }
 
@@ -155,14 +174,41 @@ impl Periodic3D {
         let dt = self.dt;
 
         // Allocate RK stage nonlinear terms
-        let mut n1 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
-        let mut n2 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
-        let mut n3 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
-        let mut n4 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
-        let mut temp = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
+        let mut n1 = [
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+        ];
+        let mut n2 = [
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+        ];
+        let mut n3 = [
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+        ];
+        let mut n4 = [
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+        ];
+        let mut temp = [
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+        ];
 
         // Stage 1: N1 = nonlinear(u_hat)
-        compute_nonlinear(&self.ops, &self.fft, &self.fft_padded, &self.grid, &self.u_hat, &mut n1);
+        compute_nonlinear(
+            &self.ops,
+            &self.fft,
+            &self.fft_padded,
+            &self.grid,
+            &self.u_hat,
+            &mut n1,
+        );
 
         // Stage 2: temp = exp_half * u_hat + dt * a21 * N1
         for c in 0..3 {
@@ -182,7 +228,14 @@ impl Periodic3D {
                 }
             }
         }
-        compute_nonlinear(&self.ops, &self.fft, &self.fft_padded, &self.grid, &temp, &mut n2);
+        compute_nonlinear(
+            &self.ops,
+            &self.fft,
+            &self.fft_padded,
+            &self.grid,
+            &temp,
+            &mut n2,
+        );
 
         // Stage 3: temp = exp_half * u_hat + dt * a31 * N2
         for c in 0..3 {
@@ -202,7 +255,14 @@ impl Periodic3D {
                 }
             }
         }
-        compute_nonlinear(&self.ops, &self.fft, &self.fft_padded, &self.grid, &temp, &mut n3);
+        compute_nonlinear(
+            &self.ops,
+            &self.fft,
+            &self.fft_padded,
+            &self.grid,
+            &temp,
+            &mut n3,
+        );
 
         // Stage 4: temp = exp_full * u_hat + dt * a41 * (2*N3 - N1)
         // Note: stage 4 uses exp_half * (exp_half * u_hat) for the linear part,
@@ -231,7 +291,14 @@ impl Periodic3D {
                 }
             }
         }
-        compute_nonlinear(&self.ops, &self.fft, &self.fft_padded, &self.grid, &temp, &mut n4);
+        compute_nonlinear(
+            &self.ops,
+            &self.fft,
+            &self.fft_padded,
+            &self.grid,
+            &temp,
+            &mut n4,
+        );
 
         // Final update: u_hat = exp_full * u_hat + dt * (b1*N1 + b23*(N2+N3) + b4*N4)
         for c in 0..3 {
@@ -243,11 +310,11 @@ impl Periodic3D {
                         let u = self.u_hat[c][[ix, iy, iz]];
                         let rhs = Complex {
                             re: ec.b1 * n1[c][[ix, iy, iz]].re
-                              + ec.b23 * (n2[c][[ix, iy, iz]].re + n3[c][[ix, iy, iz]].re)
-                              + ec.b4 * n4[c][[ix, iy, iz]].re,
+                                + ec.b23 * (n2[c][[ix, iy, iz]].re + n3[c][[ix, iy, iz]].re)
+                                + ec.b4 * n4[c][[ix, iy, iz]].re,
                             im: ec.b1 * n1[c][[ix, iy, iz]].im
-                              + ec.b23 * (n2[c][[ix, iy, iz]].im + n3[c][[ix, iy, iz]].im)
-                              + ec.b4 * n4[c][[ix, iy, iz]].im,
+                                + ec.b23 * (n2[c][[ix, iy, iz]].im + n3[c][[ix, iy, iz]].im)
+                                + ec.b4 * n4[c][[ix, iy, iz]].im,
                         };
                         self.u_hat[c][[ix, iy, iz]] = Complex {
                             re: ec.exp_full * u.re + dt * rhs.re,
@@ -265,7 +332,11 @@ impl Domain<f64> for Periodic3D {
     fn step(&mut self) {
         // Adaptive dt
         let new_dt = Self::compute_cfl_dt_static(
-            &self.u_hat, &self.fft, &self.grid, self.cfl_safety, self.params.nu,
+            &self.u_hat,
+            &self.fft,
+            &self.grid,
+            self.cfl_safety,
+            self.params.nu,
         );
         if (new_dt - self.dt).abs() / self.dt.max(1e-30) > 0.01 {
             self.dt = new_dt;
@@ -277,9 +348,15 @@ impl Domain<f64> for Periodic3D {
         self.step_count += 1;
     }
 
-    fn time(&self) -> f64 { self.time }
-    fn step_count(&self) -> u64 { self.step_count }
-    fn dt(&self) -> f64 { self.dt }
+    fn time(&self) -> f64 {
+        self.time
+    }
+    fn step_count(&self) -> u64 {
+        self.step_count
+    }
+    fn dt(&self) -> f64 {
+        self.dt
+    }
 
     fn energy(&self) -> f64 {
         // E = (1/2) * (1/N^3) * sum |u_hat|^2 (with R2C weighting)
@@ -291,8 +368,12 @@ impl Domain<f64> for Periodic3D {
                 for iy in 0..sny {
                     for iz in 0..snz {
                         let mag2 = self.u_hat[c][[ix, iy, iz]].re.powi(2)
-                                 + self.u_hat[c][[ix, iy, iz]].im.powi(2);
-                        let weight = if iz == 0 || iz == self.grid.nz / 2 { 1.0 } else { 2.0 };
+                            + self.u_hat[c][[ix, iy, iz]].im.powi(2);
+                        let weight = if iz == 0 || iz == self.grid.nz / 2 {
+                            1.0
+                        } else {
+                            2.0
+                        };
                         e += weight * mag2;
                     }
                 }
@@ -318,8 +399,12 @@ impl Domain<f64> for Periodic3D {
                 for iy in 0..sny {
                     for iz in 0..snz {
                         let mag2 = omega_hat[c][[ix, iy, iz]].re.powi(2)
-                                 + omega_hat[c][[ix, iy, iz]].im.powi(2);
-                        let weight = if iz == 0 || iz == self.grid.nz / 2 { 1.0 } else { 2.0 };
+                            + omega_hat[c][[ix, iy, iz]].im.powi(2);
+                        let weight = if iz == 0 || iz == self.grid.nz / 2 {
+                            1.0
+                        } else {
+                            2.0
+                        };
                         ens += weight * mag2;
                     }
                 }
@@ -347,7 +432,11 @@ impl Domain<f64> for Periodic3D {
                         let u = self.u_hat[c][[ix, iy, iz]];
                         let o = omega_hat[c][[ix, iy, iz]];
                         let dot = u.re * o.re + u.im * o.im;
-                        let weight = if iz == 0 || iz == self.grid.nz / 2 { 1.0 } else { 2.0 };
+                        let weight = if iz == 0 || iz == self.grid.nz / 2 {
+                            1.0
+                        } else {
+                            2.0
+                        };
                         h += weight * dot;
                     }
                 }
@@ -381,7 +470,11 @@ impl Domain<f64> for Periodic3D {
                         let o = omega_hat[c][[ix, iy, iz]];
                         let co = curl_omega_hat[c][[ix, iy, iz]];
                         let dot = o.re * co.re + o.im * co.im;
-                        let weight = if iz == 0 || iz == self.grid.nz / 2 { 1.0 } else { 2.0 };
+                        let weight = if iz == 0 || iz == self.grid.nz / 2 {
+                            1.0
+                        } else {
+                            2.0
+                        };
                         h2 += weight * dot;
                     }
                 }
@@ -413,8 +506,8 @@ impl Domain<f64> for Periodic3D {
             for j in 0..self.grid.ny {
                 for k in 0..self.grid.nz {
                     let w2 = omega_phys[0][[i, j, k]].powi(2)
-                           + omega_phys[1][[i, j, k]].powi(2)
-                           + omega_phys[2][[i, j, k]].powi(2);
+                        + omega_phys[1][[i, j, k]].powi(2)
+                        + omega_phys[2][[i, j, k]].powi(2);
                     max_w = max_w.max(w2.sqrt());
                 }
             }
@@ -423,12 +516,24 @@ impl Domain<f64> for Periodic3D {
     }
 
     fn cfl_dt(&self) -> f64 {
-        Self::compute_cfl_dt_static(&self.u_hat, &self.fft, &self.grid, self.cfl_safety, self.params.nu)
+        Self::compute_cfl_dt_static(
+            &self.u_hat,
+            &self.fft,
+            &self.grid,
+            self.cfl_safety,
+            self.params.nu,
+        )
     }
 
-    fn u_hat(&self) -> &[Array3<Complex<f64>>; 3] { &self.u_hat }
-    fn grid(&self) -> &GridSpec { &self.grid }
-    fn params(&self) -> &PhysicsParams { &self.params }
+    fn u_hat(&self) -> &[Array3<Complex<f64>>; 3] {
+        &self.u_hat
+    }
+    fn grid(&self) -> &GridSpec {
+        &self.grid
+    }
+    fn params(&self) -> &PhysicsParams {
+        &self.params
+    }
 
     fn snapshot(&self) -> Snapshot<f64> {
         let mut velocity = VectorField::zeros(self.grid);

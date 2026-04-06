@@ -1,3 +1,3 @@
 pub mod snapshot;
 
-pub use snapshot::{write_snapshot, read_snapshot_metadata, SnapshotMetadata};
+pub use snapshot::{SnapshotMetadata, read_snapshot_metadata, write_snapshot};

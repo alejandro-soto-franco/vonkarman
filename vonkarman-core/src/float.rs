@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display};
-use std::ops::{Add, Sub, Mul, Div, Neg, AddAssign, SubAssign, MulAssign, DivAssign};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// Multi-precision floating-point trait.
 ///
@@ -63,21 +63,66 @@ impl Float for f64 {
     const PI: Self = std::f64::consts::PI;
     const EPSILON_VAL: Self = f64::EPSILON;
 
-    #[inline] fn from_f64(x: f64) -> Self { x }
-    #[inline] fn to_f64(self) -> f64 { self }
-    #[inline] fn sqrt(self) -> Self { f64::sqrt(self) }
-    #[inline] fn cbrt(self) -> Self { f64::cbrt(self) }
-    #[inline] fn sin(self) -> Self { f64::sin(self) }
-    #[inline] fn cos(self) -> Self { f64::cos(self) }
-    #[inline] fn exp(self) -> Self { f64::exp(self) }
-    #[inline] fn ln(self) -> Self { f64::ln(self) }
-    #[inline] fn abs(self) -> Self { f64::abs(self) }
-    #[inline] fn powi(self, n: i32) -> Self { f64::powi(self, n) }
-    #[inline] fn powf(self, e: Self) -> Self { f64::powf(self, e) }
-    #[inline] fn max(self, other: Self) -> Self { f64::max(self, other) }
-    #[inline] fn min(self, other: Self) -> Self { f64::min(self, other) }
-    #[inline] fn is_finite(self) -> bool { f64::is_finite(self) }
-    #[inline] fn is_nan(self) -> bool { f64::is_nan(self) }
+    #[inline]
+    fn from_f64(x: f64) -> Self {
+        x
+    }
+    #[inline]
+    fn to_f64(self) -> f64 {
+        self
+    }
+    #[inline]
+    fn sqrt(self) -> Self {
+        f64::sqrt(self)
+    }
+    #[inline]
+    fn cbrt(self) -> Self {
+        f64::cbrt(self)
+    }
+    #[inline]
+    fn sin(self) -> Self {
+        f64::sin(self)
+    }
+    #[inline]
+    fn cos(self) -> Self {
+        f64::cos(self)
+    }
+    #[inline]
+    fn exp(self) -> Self {
+        f64::exp(self)
+    }
+    #[inline]
+    fn ln(self) -> Self {
+        f64::ln(self)
+    }
+    #[inline]
+    fn abs(self) -> Self {
+        f64::abs(self)
+    }
+    #[inline]
+    fn powi(self, n: i32) -> Self {
+        f64::powi(self, n)
+    }
+    #[inline]
+    fn powf(self, e: Self) -> Self {
+        f64::powf(self, e)
+    }
+    #[inline]
+    fn max(self, other: Self) -> Self {
+        f64::max(self, other)
+    }
+    #[inline]
+    fn min(self, other: Self) -> Self {
+        f64::min(self, other)
+    }
+    #[inline]
+    fn is_finite(self) -> bool {
+        f64::is_finite(self)
+    }
+    #[inline]
+    fn is_nan(self) -> bool {
+        f64::is_nan(self)
+    }
 
     #[inline]
     fn sin_cos(self) -> (Self, Self) {

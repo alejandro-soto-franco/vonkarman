@@ -1,7 +1,7 @@
+use crate::field::GridSpec;
+use crate::float::Float;
 use ndarray::{Array1, Array3};
 use num_complex::Complex;
-use crate::float::Float;
-use crate::field::GridSpec;
 
 /// Spectral derivative operations in Fourier space.
 ///
@@ -33,14 +33,18 @@ impl<F: Float> SpectralOps<F> {
         for ix in 0..snx {
             for iy in 0..sny {
                 for iz in 0..snz {
-                    k_mag_sq[[ix, iy, iz]] = kx[ix] * kx[ix]
-                        + ky[iy] * ky[iy]
-                        + kz[iz] * kz[iz];
+                    k_mag_sq[[ix, iy, iz]] = kx[ix] * kx[ix] + ky[iy] * ky[iy] + kz[iz] * kz[iz];
                 }
             }
         }
 
-        Self { kx, ky, kz, k_mag_sq, grid: *grid }
+        Self {
+            kx,
+            ky,
+            kz,
+            k_mag_sq,
+            grid: *grid,
+        }
     }
 
     /// Wavenumbers for a full (non-R2C) dimension: [0, 1, ..., n/2, -(n/2-1), ..., -1].
@@ -74,11 +78,7 @@ impl<F: Float> SpectralOps<F> {
     /// omega_x = i*(ky*uz - kz*uy)
     /// omega_y = i*(kz*ux - kx*uz)
     /// omega_z = i*(kx*uy - ky*ux)
-    pub fn curl(
-        &self,
-        u_hat: &[Array3<Complex<F>>; 3],
-        omega_hat: &mut [Array3<Complex<F>>; 3],
-    ) {
+    pub fn curl(&self, u_hat: &[Array3<Complex<F>>; 3], omega_hat: &mut [Array3<Complex<F>>; 3]) {
         let (snx, sny, snz) = self.grid.spectral_shape();
         for ix in 0..snx {
             let kx = self.kx[ix];
@@ -221,11 +221,11 @@ mod tests {
                     let kz = ops.kz[iz];
                     let div = Complex {
                         re: kx * u_hat[0][[ix, iy, iz]].re
-                          + ky * u_hat[1][[ix, iy, iz]].re
-                          + kz * u_hat[2][[ix, iy, iz]].re,
+                            + ky * u_hat[1][[ix, iy, iz]].re
+                            + kz * u_hat[2][[ix, iy, iz]].re,
                         im: kx * u_hat[0][[ix, iy, iz]].im
-                          + ky * u_hat[1][[ix, iy, iz]].im
-                          + kz * u_hat[2][[ix, iy, iz]].im,
+                            + ky * u_hat[1][[ix, iy, iz]].im
+                            + kz * u_hat[2][[ix, iy, iz]].im,
                     };
                     let mag = (div.re * div.re + div.im * div.im).sqrt();
                     assert!(mag < 1e-12, "divergence at ({ix},{iy},{iz}) = {mag}");

@@ -1,6 +1,6 @@
 use vonkarman_core::domain::Domain;
 use vonkarman_core::field::GridSpec;
-use vonkarman_periodic::{Periodic3D, IcType};
+use vonkarman_periodic::{IcType, Periodic3D};
 
 #[test]
 fn taylor_green_re100_energy_conservation() {

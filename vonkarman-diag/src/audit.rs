@@ -1,12 +1,24 @@
-use serde::Serialize;
 use crate::scalar::ScalarDiagnostics;
+use serde::Serialize;
 
 /// Violations detected by the conservation audit.
 #[derive(Debug, Clone, Serialize)]
 pub enum Violation {
-    EnergyIncrease { step: u64, prev: f64, curr: f64 },
-    DissipationMismatch { step: u64, computed: f64, expected: f64, rel_err: f64 },
-    NanDetected { step: u64, field: String },
+    EnergyIncrease {
+        step: u64,
+        prev: f64,
+        curr: f64,
+    },
+    DissipationMismatch {
+        step: u64,
+        computed: f64,
+        expected: f64,
+        rel_err: f64,
+    },
+    NanDetected {
+        step: u64,
+        field: String,
+    },
 }
 
 /// Tracks conservation law compliance across timesteps.
@@ -95,7 +107,10 @@ mod tests {
         audit.check(1.0, 0.0, 0.0, 0.0);
         audit.check(1.1, -0.2, -0.19, 0.0); // energy went up!
         assert_eq!(audit.violations.len(), 1);
-        assert!(matches!(audit.violations[0], Violation::EnergyIncrease { .. }));
+        assert!(matches!(
+            audit.violations[0],
+            Violation::EnergyIncrease { .. }
+        ));
     }
 
     #[test]

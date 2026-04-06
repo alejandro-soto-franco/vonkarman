@@ -1,13 +1,13 @@
+use crate::config::ExperimentConfig;
+use crate::diagnostics_writer::DiagnosticsWriter;
 use std::path::Path;
 use std::time::Instant;
 use tracing::{info, warn};
 use vonkarman_core::domain::Domain;
 use vonkarman_core::field::GridSpec;
-use vonkarman_diag::scalar::ScalarDiagnostics;
 use vonkarman_diag::audit::ConservationAudit;
-use vonkarman_periodic::{Periodic3D, IcType};
-use crate::config::ExperimentConfig;
-use crate::diagnostics_writer::DiagnosticsWriter;
+use vonkarman_diag::scalar::ScalarDiagnostics;
+use vonkarman_periodic::{IcType, Periodic3D};
 
 pub fn run(config: &ExperimentConfig) -> Result<(), Box<dyn std::error::Error>> {
     let grid = GridSpec::cubic(config.domain.n, config.domain.l);
@@ -35,11 +35,15 @@ pub fn run(config: &ExperimentConfig) -> Result<(), Box<dyn std::error::Error>> 
     let parquet_path = output_dir.join("diagnostics.parquet");
     let mut writer = DiagnosticsWriter::new(&parquet_path)?;
 
-    let diag_interval = config.commit_cycle.as_ref()
+    let diag_interval = config
+        .commit_cycle
+        .as_ref()
         .map(|c| c.diagnostics_interval)
         .unwrap_or(1);
 
-    let audit_enabled = config.diagnostics.as_ref()
+    let audit_enabled = config
+        .diagnostics
+        .as_ref()
         .map(|d| d.conservation_audit)
         .unwrap_or(true);
     let mut audit = ConservationAudit::new();
@@ -47,7 +51,10 @@ pub fn run(config: &ExperimentConfig) -> Result<(), Box<dyn std::error::Error>> 
     let max_steps = config.termination.max_steps.unwrap_or(u64::MAX);
     let max_time = config.termination.max_time.unwrap_or(f64::INFINITY);
     let max_wall_hours = config.termination.max_wall_hours.unwrap_or(f64::INFINITY);
-    let max_vort = config.termination.max_vorticity_threshold.unwrap_or(f64::INFINITY);
+    let max_vort = config
+        .termination
+        .max_vorticity_threshold
+        .unwrap_or(f64::INFINITY);
 
     let wall_start = Instant::now();
 
@@ -105,7 +112,10 @@ pub fn run(config: &ExperimentConfig) -> Result<(), Box<dyn std::error::Error>> 
             break;
         }
         if solver.max_vorticity() >= max_vort {
-            warn!(max_vorticity = solver.max_vorticity(), "vorticity threshold exceeded");
+            warn!(
+                max_vorticity = solver.max_vorticity(),
+                "vorticity threshold exceeded"
+            );
             break;
         }
         if solver.energy().is_nan() {
@@ -118,7 +128,10 @@ pub fn run(config: &ExperimentConfig) -> Result<(), Box<dyn std::error::Error>> 
     writer.finish()?;
 
     if audit.has_violations() {
-        warn!(count = audit.violations.len(), "conservation violations detected");
+        warn!(
+            count = audit.violations.len(),
+            "conservation violations detected"
+        );
         for v in &audit.violations {
             warn!(?v, "violation");
         }

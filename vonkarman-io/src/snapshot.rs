@@ -1,6 +1,6 @@
-use std::path::Path;
 use hdf5::File as H5File;
 use ndarray::Array3;
+use std::path::Path;
 use vonkarman_core::domain::Snapshot;
 
 /// Metadata read from a snapshot file (without loading full arrays).
@@ -31,17 +31,39 @@ pub fn write_snapshot(
 
     // Metadata
     let meta = file.create_group("metadata")?;
-    meta.new_attr::<f64>().create("time")?.write_scalar(&snapshot.time)?;
-    meta.new_attr::<u64>().create("step")?.write_scalar(&snapshot.step)?;
-    meta.new_attr::<f64>().create("dt")?.write_scalar(&snapshot.dt)?;
-    meta.new_attr::<u64>().create("nx")?.write_scalar(&(snapshot.grid.nx as u64))?;
-    meta.new_attr::<u64>().create("ny")?.write_scalar(&(snapshot.grid.ny as u64))?;
-    meta.new_attr::<u64>().create("nz")?.write_scalar(&(snapshot.grid.nz as u64))?;
-    meta.new_attr::<f64>().create("lx")?.write_scalar(&snapshot.grid.lx)?;
-    meta.new_attr::<f64>().create("ly")?.write_scalar(&snapshot.grid.ly)?;
-    meta.new_attr::<f64>().create("lz")?.write_scalar(&snapshot.grid.lz)?;
-    meta.new_attr::<f64>().create("nu")?.write_scalar(&snapshot.params.nu)?;
-    meta.new_attr::<f64>().create("re")?.write_scalar(&snapshot.params.re)?;
+    meta.new_attr::<f64>()
+        .create("time")?
+        .write_scalar(&snapshot.time)?;
+    meta.new_attr::<u64>()
+        .create("step")?
+        .write_scalar(&snapshot.step)?;
+    meta.new_attr::<f64>()
+        .create("dt")?
+        .write_scalar(&snapshot.dt)?;
+    meta.new_attr::<u64>()
+        .create("nx")?
+        .write_scalar(&(snapshot.grid.nx as u64))?;
+    meta.new_attr::<u64>()
+        .create("ny")?
+        .write_scalar(&(snapshot.grid.ny as u64))?;
+    meta.new_attr::<u64>()
+        .create("nz")?
+        .write_scalar(&(snapshot.grid.nz as u64))?;
+    meta.new_attr::<f64>()
+        .create("lx")?
+        .write_scalar(&snapshot.grid.lx)?;
+    meta.new_attr::<f64>()
+        .create("ly")?
+        .write_scalar(&snapshot.grid.ly)?;
+    meta.new_attr::<f64>()
+        .create("lz")?
+        .write_scalar(&snapshot.grid.lz)?;
+    meta.new_attr::<f64>()
+        .create("nu")?
+        .write_scalar(&snapshot.params.nu)?;
+    meta.new_attr::<f64>()
+        .create("re")?
+        .write_scalar(&snapshot.params.re)?;
 
     // Velocity (physical space)
     let vel = file.create_group("velocity")?;
@@ -71,9 +93,7 @@ pub fn write_snapshot(
 }
 
 /// Read snapshot metadata without loading full arrays.
-pub fn read_snapshot_metadata(
-    path: &Path,
-) -> Result<SnapshotMetadata, Box<dyn std::error::Error>> {
+pub fn read_snapshot_metadata(path: &Path) -> Result<SnapshotMetadata, Box<dyn std::error::Error>> {
     let file = H5File::open(path)?;
     let meta = file.group("metadata")?;
 
@@ -95,9 +115,7 @@ fn write_array3(
     data: &Array3<f64>,
     shape: &[usize; 3],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ds = group.new_dataset::<f64>()
-        .shape(*shape)
-        .create(name)?;
+    let ds = group.new_dataset::<f64>().shape(*shape).create(name)?;
     ds.write(data)?;
     Ok(())
 }
@@ -132,7 +150,11 @@ mod tests {
                 Array3::from_elem((snx, sny, snz), zero),
             ],
             grid,
-            params: PhysicsParams { nu: 0.01, re: 100.0, domain: DomainType::Periodic3D },
+            params: PhysicsParams {
+                nu: 0.01,
+                re: 100.0,
+                domain: DomainType::Periodic3D,
+            },
         };
 
         write_snapshot(&path, &snapshot).unwrap();

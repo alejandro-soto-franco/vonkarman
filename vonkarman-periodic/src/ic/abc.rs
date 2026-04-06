@@ -81,8 +81,8 @@ mod tests {
             for j in 0..grid.ny {
                 for k in 0..grid.nz {
                     let u2 = v.x()[[i, j, k]].powi(2)
-                           + v.y()[[i, j, k]].powi(2)
-                           + v.z()[[i, j, k]].powi(2);
+                        + v.y()[[i, j, k]].powi(2)
+                        + v.z()[[i, j, k]].powi(2);
                     energy += u2 * dv;
                 }
             }
@@ -111,8 +111,8 @@ mod tests {
             for j in 0..grid.ny {
                 for k in 0..grid.nz {
                     let u2 = v.x()[[i, j, k]].powi(2)
-                           + v.y()[[i, j, k]].powi(2)
-                           + v.z()[[i, j, k]].powi(2);
+                        + v.y()[[i, j, k]].powi(2)
+                        + v.z()[[i, j, k]].powi(2);
                     u_sq += u2 * dv;
                 }
             }

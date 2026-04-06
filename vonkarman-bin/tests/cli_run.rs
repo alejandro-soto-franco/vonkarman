@@ -9,7 +9,10 @@ fn cli_run_taylor_green() {
     let config_path = dir.join("test.toml");
     let output_dir = dir.join("output");
 
-    std::fs::write(&config_path, format!(r#"
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
 [run]
 name = "cli-test"
 output_dir = "{}"
@@ -26,7 +29,11 @@ type = "taylor-green"
 
 [termination]
 max_steps = 10
-"#, output_dir.display())).unwrap();
+"#,
+            output_dir.display()
+        ),
+    )
+    .unwrap();
 
     // Build first, then run the binary directly
     let build = Command::new("cargo")
@@ -34,7 +41,11 @@ max_steps = 10
         .current_dir(env!("CARGO_MANIFEST_DIR").replace("vonkarman-bin", ""))
         .output()
         .expect("failed to build");
-    assert!(build.status.success(), "build failed: {}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 
     let workspace_root = env!("CARGO_MANIFEST_DIR").replace("vonkarman-bin", "");
     let binary = format!("{workspace_root}target/debug/vonkarman");

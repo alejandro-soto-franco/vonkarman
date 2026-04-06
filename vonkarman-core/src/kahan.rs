@@ -1,5 +1,5 @@
-use ndarray::Array3;
 use crate::float::Float;
+use ndarray::Array3;
 
 /// Kahan-compensated summation over a 3D array.
 ///
@@ -52,7 +52,10 @@ mod tests {
         a[[0, 0, 0]] = 1.0;
         let s = kahan_sum(&a);
         let expected = 1.0 + (n as f64 - 1.0) * eps;
-        assert!((s - expected).abs() < 1e-14, "kahan_sum={s}, expected={expected}");
+        assert!(
+            (s - expected).abs() < 1e-14,
+            "kahan_sum={s}, expected={expected}"
+        );
     }
 
     #[test]

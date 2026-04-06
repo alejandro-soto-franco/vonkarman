@@ -1,6 +1,3 @@
-use std::fs::File;
-use std::path::Path;
-use std::sync::Arc;
 use arrow::array::Float64Array;
 use arrow::array::UInt64Array;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -8,6 +5,9 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use std::fs::File;
+use std::path::Path;
+use std::sync::Arc;
 use vonkarman_diag::ScalarDiagnostics;
 
 /// Writes scalar diagnostics to a Parquet file, one row per timestep.
@@ -50,7 +50,10 @@ impl DiagnosticsWriter {
         })
     }
 
-    pub fn write_row(&mut self, diag: &ScalarDiagnostics) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn write_row(
+        &mut self,
+        diag: &ScalarDiagnostics,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.buffer.push(diag.clone());
         if self.buffer.len() >= self.flush_interval {
             self.flush()?;
@@ -65,17 +68,51 @@ impl DiagnosticsWriter {
         let batch = RecordBatch::try_new(
             self.schema.clone(),
             vec![
-                Arc::new(UInt64Array::from(self.buffer.iter().map(|d| d.step).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.time).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.dt).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.energy).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.enstrophy).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.helicity).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.superhelicity).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.max_vorticity).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.energy_dissipation_rate).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.helicity_dissipation_rate).collect::<Vec<_>>())),
-                Arc::new(Float64Array::from(self.buffer.iter().map(|d| d.cfl_number).collect::<Vec<_>>())),
+                Arc::new(UInt64Array::from(
+                    self.buffer.iter().map(|d| d.step).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer.iter().map(|d| d.time).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer.iter().map(|d| d.dt).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer.iter().map(|d| d.energy).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer.iter().map(|d| d.enstrophy).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer.iter().map(|d| d.helicity).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer
+                        .iter()
+                        .map(|d| d.superhelicity)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer
+                        .iter()
+                        .map(|d| d.max_vorticity)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer
+                        .iter()
+                        .map(|d| d.energy_dissipation_rate)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer
+                        .iter()
+                        .map(|d| d.helicity_dissipation_rate)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    self.buffer.iter().map(|d| d.cfl_number).collect::<Vec<_>>(),
+                )),
             ],
         )?;
         self.writer.write(&batch)?;

@@ -1,5 +1,10 @@
 # vonkarman
 
+[![CI](https://github.com/alejandro-soto-franco/vonkarman/actions/workflows/ci.yml/badge.svg)](https://github.com/alejandro-soto-franco/vonkarman/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Rust-2024_edition-orange.svg)](https://www.rust-lang.org/)
+![Crates](https://img.shields.io/badge/crates-6-blue)
+
 Multi-precision pseudospectral Navier-Stokes solver with topological diagnostics.
 
 ## Overview

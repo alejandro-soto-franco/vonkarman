@@ -78,9 +78,13 @@ pub fn random_isotropic(
         for ix in 0..snx {
             for iy in 0..sny {
                 for iz in 0..snz {
-                    let mag2 = u_hat[c][[ix, iy, iz]].re.powi(2)
-                             + u_hat[c][[ix, iy, iz]].im.powi(2);
-                    let weight = if iz == 0 || iz == grid.nz / 2 { 1.0 } else { 2.0 };
+                    let mag2 =
+                        u_hat[c][[ix, iy, iz]].re.powi(2) + u_hat[c][[ix, iy, iz]].im.powi(2);
+                    let weight = if iz == 0 || iz == grid.nz / 2 {
+                        1.0
+                    } else {
+                        2.0
+                    };
                     current_energy += weight * mag2;
                 }
             }
@@ -128,8 +132,8 @@ mod tests {
             for j in 0..n {
                 for k in 0..n {
                     let u2 = v.x()[[i, j, k]].powi(2)
-                           + v.y()[[i, j, k]].powi(2)
-                           + v.z()[[i, j, k]].powi(2);
+                        + v.y()[[i, j, k]].powi(2)
+                        + v.z()[[i, j, k]].powi(2);
                     energy += u2 * dv;
                 }
             }

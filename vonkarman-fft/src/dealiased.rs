@@ -1,7 +1,7 @@
+use crate::backend::FftBackend;
 use ndarray::Array3;
 use num_complex::Complex;
 use vonkarman_core::field::GridSpec;
-use crate::backend::FftBackend;
 
 /// Compute the dealiased cross product u x omega in spectral space
 /// using 3/2 zero-padding.
@@ -45,13 +45,19 @@ pub fn dealiased_cross_product(
     for c in 0..3 {
         let mut padded_hat = Array3::<Complex<f64>>::zeros((pnx, pny, pnz_half));
         zero_pad_spectral(&u_hat[c], &mut padded_hat, grid.nx, grid.ny);
-        padded_hat.mapv_inplace(|v| Complex { re: v.re * scale, im: v.im * scale });
+        padded_hat.mapv_inplace(|v| Complex {
+            re: v.re * scale,
+            im: v.im * scale,
+        });
         padded_backend.c2r_3d(&padded_hat, &mut u_phys[c]);
     }
     for c in 0..3 {
         let mut padded_hat = Array3::<Complex<f64>>::zeros((pnx, pny, pnz_half));
         zero_pad_spectral(&omega_hat[c], &mut padded_hat, grid.nx, grid.ny);
-        padded_hat.mapv_inplace(|v| Complex { re: v.re * scale, im: v.im * scale });
+        padded_hat.mapv_inplace(|v| Complex {
+            re: v.re * scale,
+            im: v.im * scale,
+        });
         padded_backend.c2r_3d(&padded_hat, &mut omega_phys[c]);
     }
 
@@ -144,7 +150,11 @@ fn truncate_spectral(
     for ix in 0..dnx {
         let six = if ix < nx / 2 { ix } else { snx - (dnx - ix) };
         for iy in 0..dny {
-            let siy = if iy < ny / 2 { iy } else { src.shape()[1] - (dny - iy) };
+            let siy = if iy < ny / 2 {
+                iy
+            } else {
+                src.shape()[1] - (dny - iy)
+            };
             for iz in 0..dnz {
                 dst[[ix, iy, iz]] = src[[six, siy, iz]];
             }
@@ -155,19 +165,17 @@ fn truncate_spectral(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ndrustfft_backend::NdrustfftBackend;
     use ndarray::Array3;
     use num_complex::Complex;
     use vonkarman_core::field::GridSpec;
-    use crate::ndrustfft_backend::NdrustfftBackend;
 
     #[test]
     fn dealiased_cross_product_zero_input() {
         let n = 8;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
         let backend = NdrustfftBackend::new(n, n, n);
-        let padded_backend = NdrustfftBackend::new(
-            3 * n / 2, 3 * n / 2, 3 * n / 2,
-        );
+        let padded_backend = NdrustfftBackend::new(3 * n / 2, 3 * n / 2, 3 * n / 2);
         let (snx, sny, snz) = grid.spectral_shape();
         let shape = (snx, sny, snz);
         let zero = Complex { re: 0.0, im: 0.0 };
@@ -179,7 +187,12 @@ mod tests {
         let omega_hat = u_hat.clone();
         let mut result = u_hat.clone();
         dealiased_cross_product(
-            &backend, &padded_backend, &grid, &u_hat, &omega_hat, &mut result,
+            &backend,
+            &padded_backend,
+            &grid,
+            &u_hat,
+            &omega_hat,
+            &mut result,
         );
         for c in 0..3 {
             for val in result[c].iter() {
@@ -194,33 +207,49 @@ mod tests {
         let n = 8;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
         let backend = NdrustfftBackend::new(n, n, n);
-        let padded_backend = NdrustfftBackend::new(
-            3 * n / 2, 3 * n / 2, 3 * n / 2,
-        );
+        let padded_backend = NdrustfftBackend::new(3 * n / 2, 3 * n / 2, 3 * n / 2);
         let (snx, sny, snz) = grid.spectral_shape();
         let shape = (snx, sny, snz);
 
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
-            Array3::zeros(shape), Array3::zeros(shape), Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
         ];
         let mut omega_hat: [Array3<Complex<f64>>; 3] = [
-            Array3::zeros(shape), Array3::zeros(shape), Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
         ];
         // Put energy in a single mode
         u_hat[0][[1, 0, 0]] = Complex { re: 1.0, im: 0.5 };
         omega_hat[1][[0, 1, 0]] = Complex { re: 0.7, im: -0.3 };
 
         let mut r1 = [
-            Array3::zeros(shape), Array3::zeros(shape), Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
         ];
         let mut r2 = [
-            Array3::zeros(shape), Array3::zeros(shape), Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
         ];
         dealiased_cross_product(
-            &backend, &padded_backend, &grid, &u_hat, &omega_hat, &mut r1,
+            &backend,
+            &padded_backend,
+            &grid,
+            &u_hat,
+            &omega_hat,
+            &mut r1,
         );
         dealiased_cross_product(
-            &backend, &padded_backend, &grid, &omega_hat, &u_hat, &mut r2,
+            &backend,
+            &padded_backend,
+            &grid,
+            &omega_hat,
+            &u_hat,
+            &mut r2,
         );
         // r1 should equal -r2
         for c in 0..3 {

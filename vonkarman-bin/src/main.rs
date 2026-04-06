@@ -6,7 +6,10 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::fmt;
 
 #[derive(Parser)]
-#[command(name = "vonkarman", about = "Multi-precision pseudospectral Navier-Stokes solver")]
+#[command(
+    name = "vonkarman",
+    about = "Multi-precision pseudospectral Navier-Stokes solver"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -27,7 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Run { config: config_path } => {
+        Commands::Run {
+            config: config_path,
+        } => {
             let contents = std::fs::read_to_string(&config_path)?;
             let config: config::ExperimentConfig = toml::from_str(&contents)?;
             run::run(&config)?;

@@ -1,9 +1,9 @@
+use crate::nonlinear::compute_nonlinear;
 use ndarray::Array3;
 use num_complex::Complex;
 use vonkarman_core::field::GridSpec;
 use vonkarman_core::spectral_ops::SpectralOps;
 use vonkarman_fft::FftBackend;
-use crate::nonlinear::compute_nonlinear;
 
 /// Classical RK4 time integrator for the Navier-Stokes equations.
 ///
@@ -27,8 +27,7 @@ pub fn rk4_step(
     let zero = Complex { re: 0.0, im: 0.0 };
 
     // Compute full RHS = L*u + N(u) for a given state
-    let compute_rhs = |state: &[Array3<Complex<f64>>; 3],
-                       rhs: &mut [Array3<Complex<f64>>; 3]| {
+    let compute_rhs = |state: &[Array3<Complex<f64>>; 3], rhs: &mut [Array3<Complex<f64>>; 3]| {
         // Nonlinear term
         compute_nonlinear(ops, fft, fft_padded, grid, state, rhs);
         // Add viscous term: -nu * |k|^2 * u_hat
@@ -46,11 +45,19 @@ pub fn rk4_step(
     };
 
     // k1 = dt * f(u_n)
-    let mut k1 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
+    let mut k1 = [
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+    ];
     compute_rhs(u_hat, &mut k1);
 
     // temp = u_n + 0.5 * dt * k1
-    let mut temp = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
+    let mut temp = [
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+    ];
     for c in 0..3 {
         for ix in 0..snx {
             for iy in 0..sny {
@@ -65,7 +72,11 @@ pub fn rk4_step(
     }
 
     // k2 = dt * f(u_n + 0.5*dt*k1)
-    let mut k2 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
+    let mut k2 = [
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+    ];
     compute_rhs(&temp, &mut k2);
 
     // temp = u_n + 0.5 * dt * k2
@@ -83,7 +94,11 @@ pub fn rk4_step(
     }
 
     // k3 = dt * f(u_n + 0.5*dt*k2)
-    let mut k3 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
+    let mut k3 = [
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+    ];
     compute_rhs(&temp, &mut k3);
 
     // temp = u_n + dt * k3
@@ -101,7 +116,11 @@ pub fn rk4_step(
     }
 
     // k4 = dt * f(u_n + dt*k3)
-    let mut k4 = [Array3::from_elem(shape, zero), Array3::from_elem(shape, zero), Array3::from_elem(shape, zero)];
+    let mut k4 = [
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+        Array3::from_elem(shape, zero),
+    ];
     compute_rhs(&temp, &mut k4);
 
     // u_{n+1} = u_n + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
@@ -110,18 +129,16 @@ pub fn rk4_step(
         for ix in 0..snx {
             for iy in 0..sny {
                 for iz in 0..snz {
-                    u_hat[c][[ix, iy, iz]].re += sixth_dt * (
-                        k1[c][[ix, iy, iz]].re
-                        + 2.0 * k2[c][[ix, iy, iz]].re
-                        + 2.0 * k3[c][[ix, iy, iz]].re
-                        + k4[c][[ix, iy, iz]].re
-                    );
-                    u_hat[c][[ix, iy, iz]].im += sixth_dt * (
-                        k1[c][[ix, iy, iz]].im
-                        + 2.0 * k2[c][[ix, iy, iz]].im
-                        + 2.0 * k3[c][[ix, iy, iz]].im
-                        + k4[c][[ix, iy, iz]].im
-                    );
+                    u_hat[c][[ix, iy, iz]].re += sixth_dt
+                        * (k1[c][[ix, iy, iz]].re
+                            + 2.0 * k2[c][[ix, iy, iz]].re
+                            + 2.0 * k3[c][[ix, iy, iz]].re
+                            + k4[c][[ix, iy, iz]].re);
+                    u_hat[c][[ix, iy, iz]].im += sixth_dt
+                        * (k1[c][[ix, iy, iz]].im
+                            + 2.0 * k2[c][[ix, iy, iz]].im
+                            + 2.0 * k3[c][[ix, iy, iz]].im
+                            + k4[c][[ix, iy, iz]].im);
                 }
             }
         }
@@ -151,7 +168,9 @@ mod tests {
         let (snx, sny, snz) = grid.spectral_shape();
         let shape = (snx, sny, snz);
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
-            Array3::zeros(shape), Array3::zeros(shape), Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
+            Array3::zeros(shape),
         ];
         for c in 0..3 {
             fft.r2c_3d(&v.data[c], &mut u_hat[c]);
@@ -164,7 +183,8 @@ mod tests {
                 for ix in 0..snx {
                     for iy in 0..sny {
                         for iz in 0..snz {
-                            let mag2 = u[c][[ix, iy, iz]].re.powi(2) + u[c][[ix, iy, iz]].im.powi(2);
+                            let mag2 =
+                                u[c][[ix, iy, iz]].re.powi(2) + u[c][[ix, iy, iz]].im.powi(2);
                             let weight = if iz == 0 || iz == n / 2 { 1.0 } else { 2.0 };
                             e += weight * mag2;
                         }
@@ -187,6 +207,9 @@ mod tests {
             );
             prev_e = e;
         }
-        assert!(prev_e < 0.999 * e0, "RK4 energy didn't decay: {e0} -> {prev_e}");
+        assert!(
+            prev_e < 0.999 * e0,
+            "RK4 energy didn't decay: {e0} -> {prev_e}"
+        );
     }
 }
