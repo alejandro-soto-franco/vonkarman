@@ -144,8 +144,8 @@ mod tests {
 
     #[test]
     fn f64_from_to() {
-        let x = <f64 as Float>::from_f64(3.14);
-        assert_eq!(x.to_f64(), 3.14);
+        let x = <f64 as Float>::from_f64(2.78);
+        assert_eq!(x.to_f64(), 2.78);
     }
 
     #[test]

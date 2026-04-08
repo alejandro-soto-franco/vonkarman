@@ -194,8 +194,8 @@ mod tests {
             &omega_hat,
             &mut result,
         );
-        for c in 0..3 {
-            for val in result[c].iter() {
+        for component in &result {
+            for val in component.iter() {
                 assert!(val.re.abs() < 1e-14 && val.im.abs() < 1e-14);
             }
         }

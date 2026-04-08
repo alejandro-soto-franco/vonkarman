@@ -252,8 +252,8 @@ mod tests {
             ndarray::Array3::from_elem(shape, Complex { re: 0.0, im: 0.0 }),
         ];
         ops.curl(&u_hat, &mut omega_hat);
-        for c in 0..3 {
-            for val in omega_hat[c].iter() {
+        for component in &omega_hat {
+            for val in component.iter() {
                 assert!(val.re.abs() < 1e-14 && val.im.abs() < 1e-14);
             }
         }
