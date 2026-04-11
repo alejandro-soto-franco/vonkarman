@@ -16,11 +16,11 @@ license = "MIT"
 repository = "https://github.com/alejandro-soto-franco/vonkarman"
 
 [workspace.dependencies]
-vonkarman-core = { path = "vonkarman-core" }
-vonkarman-fft = { path = "vonkarman-fft" }
-vonkarman-periodic = { path = "vonkarman-periodic" }
-vonkarman-diag = { path = "vonkarman-diag" }
-vonkarman-io = { path = "vonkarman-io" }
+vonkarman-core = { path = "vonkarman-core", version = "0.2.0" }
+vonkarman-fft = { path = "vonkarman-fft", version = "0.2.0" }
+vonkarman-periodic = { path = "vonkarman-periodic", version = "0.2.0" }
+vonkarman-diag = { path = "vonkarman-diag", version = "0.2.0" }
+vonkarman-io = { path = "vonkarman-io", version = "0.2.0" }
 ndarray = { version = "0.16", features = ["rayon"] }
 num-complex = "0.4"
 rayon = "1.10"
