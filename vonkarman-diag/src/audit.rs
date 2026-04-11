@@ -133,20 +133,20 @@ impl ConservationAudit {
             }
 
             // Energy budget: |dE/dt + 2*nu*Omega| / |2*nu*Omega|
-            if let Some(prev_dt) = self.prev_dt {
-                if prev_dt > 0.0 {
-                    let de_dt = (energy - prev) / prev_dt;
-                    let expected = -2.0 * nu * enstrophy;
-                    let denom = expected.abs().max(1e-30);
-                    let residual = (de_dt - expected).abs() / denom;
-                    if residual > self.config.energy_budget_tol {
-                        self.violations.push(Violation::EnergyBudgetViolation {
-                            step,
-                            residual,
-                            de_dt,
-                            expected,
-                        });
-                    }
+            if let Some(prev_dt) = self.prev_dt
+                && prev_dt > 0.0
+            {
+                let de_dt = (energy - prev) / prev_dt;
+                let expected = -2.0 * nu * enstrophy;
+                let denom = expected.abs().max(1e-30);
+                let residual = (de_dt - expected).abs() / denom;
+                if residual > self.config.energy_budget_tol {
+                    self.violations.push(Violation::EnergyBudgetViolation {
+                        step,
+                        residual,
+                        de_dt,
+                        expected,
+                    });
                 }
             }
         }
@@ -184,14 +184,14 @@ impl ConservationAudit {
         }
 
         // Energy monotonicity
-        if let Some(prev) = self.prev_energy {
-            if diag.energy > prev + 1e-14 * prev.abs().max(1e-30) {
-                self.violations.push(Violation::EnergyIncrease {
-                    step,
-                    prev,
-                    curr: diag.energy,
-                });
-            }
+        if let Some(prev) = self.prev_energy
+            && diag.energy > prev + 1e-14 * prev.abs().max(1e-30)
+        {
+            self.violations.push(Violation::EnergyIncrease {
+                step,
+                prev,
+                curr: diag.energy,
+            });
         }
         self.prev_energy = Some(diag.energy);
     }
