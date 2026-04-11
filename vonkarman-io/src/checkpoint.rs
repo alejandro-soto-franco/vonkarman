@@ -36,16 +36,36 @@ pub fn write_checkpoint(
 
     // Metadata
     let meta = file.create_group("metadata")?;
-    meta.new_attr::<f64>().create("time")?.write_scalar(&data.time)?;
-    meta.new_attr::<u64>().create("step_count")?.write_scalar(&data.step_count)?;
-    meta.new_attr::<f64>().create("dt")?.write_scalar(&data.dt)?;
-    meta.new_attr::<u64>().create("nx")?.write_scalar(&(data.grid.nx as u64))?;
-    meta.new_attr::<u64>().create("ny")?.write_scalar(&(data.grid.ny as u64))?;
-    meta.new_attr::<u64>().create("nz")?.write_scalar(&(data.grid.nz as u64))?;
-    meta.new_attr::<f64>().create("lx")?.write_scalar(&data.grid.lx)?;
-    meta.new_attr::<f64>().create("ly")?.write_scalar(&data.grid.ly)?;
-    meta.new_attr::<f64>().create("lz")?.write_scalar(&data.grid.lz)?;
-    meta.new_attr::<f64>().create("nu")?.write_scalar(&data.nu)?;
+    meta.new_attr::<f64>()
+        .create("time")?
+        .write_scalar(&data.time)?;
+    meta.new_attr::<u64>()
+        .create("step_count")?
+        .write_scalar(&data.step_count)?;
+    meta.new_attr::<f64>()
+        .create("dt")?
+        .write_scalar(&data.dt)?;
+    meta.new_attr::<u64>()
+        .create("nx")?
+        .write_scalar(&(data.grid.nx as u64))?;
+    meta.new_attr::<u64>()
+        .create("ny")?
+        .write_scalar(&(data.grid.ny as u64))?;
+    meta.new_attr::<u64>()
+        .create("nz")?
+        .write_scalar(&(data.grid.nz as u64))?;
+    meta.new_attr::<f64>()
+        .create("lx")?
+        .write_scalar(&data.grid.lx)?;
+    meta.new_attr::<f64>()
+        .create("ly")?
+        .write_scalar(&data.grid.ly)?;
+    meta.new_attr::<f64>()
+        .create("lz")?
+        .write_scalar(&data.grid.lz)?;
+    meta.new_attr::<f64>()
+        .create("nu")?
+        .write_scalar(&data.nu)?;
 
     // Spectral coefficients
     let (snx, sny, snz) = data.grid.spectral_shape();
@@ -75,8 +95,8 @@ pub fn write_checkpoint(
         .new_dataset::<u8>()
         .shape([toml_bytes.len()])
         .create("toml")?;
-    let toml_view = ndarray::ArrayView1::from(toml_bytes);
-    ds.write_raw(toml_view)?;
+    let toml_arr = ndarray::Array1::from(toml_bytes.to_vec());
+    ds.write_raw(toml_arr.view())?;
 
     Ok(())
 }

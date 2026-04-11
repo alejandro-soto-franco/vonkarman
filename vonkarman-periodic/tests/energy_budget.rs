@@ -80,7 +80,10 @@ fn helicity_conservation_abc_flow() {
     let mut solver = Periodic3D::new(grid, nu, ic, BackendMode::Cpu);
 
     let h0 = solver.helicity();
-    assert!(h0.abs() > 0.1, "ABC flow should have significant helicity, got {h0}");
+    assert!(
+        h0.abs() > 0.1,
+        "ABC flow should have significant helicity, got {h0}"
+    );
 
     for _ in 0..30 {
         solver.step();

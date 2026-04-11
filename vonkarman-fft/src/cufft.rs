@@ -204,25 +204,15 @@ impl CufftBackend {
         let mut plan_z2d: CufftHandle = 0;
 
         unsafe {
-            let rc = (libs.cufft_plan_3d)(
-                &mut plan_d2z,
-                nx as i32,
-                ny as i32,
-                nz as i32,
-                CUFFT_D2Z,
-            );
+            let rc =
+                (libs.cufft_plan_3d)(&mut plan_d2z, nx as i32, ny as i32, nz as i32, CUFFT_D2Z);
             if rc != 0 {
                 (libs.cuda_free)(d_real);
                 (libs.cuda_free)(d_complex);
                 return Err(CufftError::PlanCreate { code: rc });
             }
-            let rc = (libs.cufft_plan_3d)(
-                &mut plan_z2d,
-                nx as i32,
-                ny as i32,
-                nz as i32,
-                CUFFT_Z2D,
-            );
+            let rc =
+                (libs.cufft_plan_3d)(&mut plan_z2d, nx as i32, ny as i32, nz as i32, CUFFT_Z2D);
             if rc != 0 {
                 (libs.cufft_destroy)(plan_d2z);
                 (libs.cuda_free)(d_real);

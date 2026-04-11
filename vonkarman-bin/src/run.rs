@@ -1,8 +1,8 @@
 use crate::config::ExperimentConfig;
 use crate::diagnostics_writer::DiagnosticsWriter;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tracing::{info, warn};
 use vonkarman_core::domain::Domain;
