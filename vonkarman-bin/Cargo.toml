@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "CLI binary for the vonkarman solver"
+publish = false
 
 [[bin]]
 name = "vonkarman"

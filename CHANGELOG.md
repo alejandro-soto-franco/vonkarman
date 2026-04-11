@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.2.0 (2026-04-11)
+
+### cuFFT GPU backend
+- `CufftBackend`: runtime-loaded cuFFT/CUDA via `libloading` (no compile-time CUDA dependency)
+- `BackendMode` (Auto/Cufft/Cpu) with `create_backend` factory and auto-fallback
+- `Periodic3D` refactored to `Box<dyn FftBackend<f64>>` for backend polymorphism
+- `--backend` CLI flag and TOML `backend` config field
+
+### Operational guarantees
+- Checkpoint write/read (HDF5) with bitwise-exact roundtrip
+- `Periodic3D::from_checkpoint` constructor for exact solver restart
+- `--restart` CLI flag for checkpoint restart
+- SIGINT/SIGTERM graceful shutdown with emergency checkpoint
+- Input config validation (power-of-2 grid, nu>0, termination, backend, CFL)
+- Periodic checkpoint writing at configurable intervals
+
+### Hardened conservation monitoring
+- `AuditConfig` with configurable tolerances for energy budget, divergence-free, and Parseval identity checks
+- `halt_on_violation` option for strict mode
+- TOML-configurable tolerance fields
+
+### Precision tests
+- Spectral convergence (Taylor-Green N=8..64, energy error < 5e-4)
+- Parseval identity verification (residual < 1e-12 at N=8,16,32)
+- Energy budget closure (midpoint enstrophy, 100% steps within tolerance)
+- Helicity conservation (ABC flow viscous decay)
+- Checkpoint-restart bitwise identity
+- Reference data validation (Taylor-Green Re=1600 N=128 vs Brachet 1983, ignored/long-running)
+
+### Benchmark infrastructure
+- Cross-solver harness: hit3d (Fortran), spectralDNS (Python), Dedalus (Python), TurboGenPY (Python)
+- `run_all.py` orchestrator with build/run/compare/report subcommands
+- Digitised Brachet 1983 and van Rees 2011 reference data
+- Matplotlib figure generation (energy, enstrophy, dissipation, performance)
+
 ## 0.1.0 (2026-04-06)
 
 ### Phase 1: Core solver
