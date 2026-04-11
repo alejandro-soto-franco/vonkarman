@@ -88,15 +88,15 @@ pub fn write_checkpoint(
         ds_im.write_raw(im_data.as_slice().ok_or("im not contiguous")?)?;
     }
 
-    // Config TOML string as byte dataset
+    // Config TOML string stored as f64-encoded bytes (avoids ndarray u8 compat issues)
     let cfg = file.create_group("config")?;
     let toml_bytes = data.config_toml.as_bytes();
+    let toml_f64: Vec<f64> = toml_bytes.iter().map(|&b| b as f64).collect();
     let ds = cfg
-        .new_dataset::<u8>()
-        .shape([toml_bytes.len()])
+        .new_dataset::<f64>()
+        .shape([toml_f64.len()])
         .create("toml")?;
-    let toml_arr = ndarray::Array1::from(toml_bytes.to_vec());
-    ds.write_raw(toml_arr.view())?;
+    ds.write_raw(toml_f64.as_slice())?;
 
     Ok(())
 }
@@ -138,11 +138,12 @@ pub fn read_checkpoint(path: &Path) -> Result<CheckpointData, Box<dyn std::error
         }
     }
 
-    // Read config TOML
+    // Read config TOML (stored as f64-encoded bytes)
     let cfg = file.group("config")?;
     let toml_ds = cfg.dataset("toml")?;
-    let toml_buf: Vec<u8> = toml_ds.read_raw()?;
-    let config_toml = String::from_utf8(toml_buf)?;
+    let toml_f64: Vec<f64> = toml_ds.read_raw()?;
+    let toml_bytes: Vec<u8> = toml_f64.iter().map(|&v| v as u8).collect();
+    let config_toml = String::from_utf8(toml_bytes)?;
 
     Ok(CheckpointData {
         u_hat,
