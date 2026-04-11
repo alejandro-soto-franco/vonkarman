@@ -44,13 +44,13 @@ pub fn validate_config(config: &ExperimentConfig) -> Vec<String> {
     }
 
     // CFL safety factor (if specified)
-    if let Some(ref integrator) = config.integrator {
-        if integrator.cfl_safety <= 0.0 || integrator.cfl_safety > 1.0 {
-            errors.push(format!(
-                "integrator.cfl_safety must be in (0, 1], got {}",
-                integrator.cfl_safety
-            ));
-        }
+    if let Some(ref integrator) = config.integrator
+        && (integrator.cfl_safety <= 0.0 || integrator.cfl_safety > 1.0)
+    {
+        errors.push(format!(
+            "integrator.cfl_safety must be in (0, 1], got {}",
+            integrator.cfl_safety
+        ));
     }
 
     errors
