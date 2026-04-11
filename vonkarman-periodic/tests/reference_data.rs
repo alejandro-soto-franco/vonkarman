@@ -48,7 +48,7 @@ fn taylor_green_re1600_reference() {
             peak_epsilon = epsilon;
         }
 
-        if step % 500 == 0 {
+        if step.is_multiple_of(500) {
             eprintln!(
                 "{t:.4},{e:.8e},{enstrophy:.8e},{epsilon:.8e},{}",
                 solver.max_vorticity()
