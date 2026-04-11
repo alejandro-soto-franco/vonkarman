@@ -1,0 +1,10 @@
+results/
+*.pyc
+__pycache__/
+.venv/
+hit3d/hit3d
+hit3d/src/
+spectraldns/.venv/
+spectraldns/spectralDNS/
+dedalus/.venv/
+turbogenpy/TurboGenPY/

@@ -6,7 +6,7 @@ use num_complex::Complex;
 use vonkarman_core::domain::{Domain, DomainType, PhysicsParams, Snapshot};
 use vonkarman_core::field::{GridSpec, VectorField};
 use vonkarman_core::spectral_ops::SpectralOps;
-use vonkarman_fft::{FftBackend, NdrustfftBackend};
+use vonkarman_fft::{BackendMode, FftBackend, create_backend};
 
 /// 3D pseudospectral Navier-Stokes solver on the periodic torus T^3.
 pub struct Periodic3D {
@@ -29,19 +29,19 @@ pub struct Periodic3D {
     /// CFL safety factor.
     cfl_safety: f64,
     /// FFT backend (original grid).
-    fft: NdrustfftBackend,
+    fft: Box<dyn FftBackend<f64>>,
     /// FFT backend (3/2-padded grid).
-    fft_padded: NdrustfftBackend,
+    fft_padded: Box<dyn FftBackend<f64>>,
 }
 
 impl Periodic3D {
-    pub fn new(grid: GridSpec, nu: f64, ic: IcType) -> Self {
+    pub fn new(grid: GridSpec, nu: f64, ic: IcType, backend_mode: BackendMode) -> Self {
         let ops = SpectralOps::<f64>::new(&grid);
         let (snx, sny, snz) = grid.spectral_shape();
         let shape = (snx, sny, snz);
 
         // FFT backends (needed before IC generation for random_isotropic)
-        let fft = NdrustfftBackend::new(grid.nx, grid.ny, grid.nz);
+        let fft = create_backend(grid.nx, grid.ny, grid.nz, backend_mode);
 
         // Generate physical-space IC and transform to spectral
         let velocity = match ic {
@@ -64,7 +64,7 @@ impl Periodic3D {
                 k_peak,
                 energy,
                 seed,
-            } => ic::random_isotropic(&grid, k_peak, energy, seed, &fft),
+            } => ic::random_isotropic(&grid, k_peak, energy, seed, fft.as_ref()),
         };
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
             Array3::zeros(shape),
@@ -76,7 +76,7 @@ impl Periodic3D {
         }
 
         let pg = grid.padded_3half();
-        let fft_padded = NdrustfftBackend::new(pg.nx, pg.ny, pg.nz);
+        let fft_padded = create_backend(pg.nx, pg.ny, pg.nz, backend_mode);
 
         let re = if nu > 0.0 { 1.0 / nu } else { f64::INFINITY };
         let params = PhysicsParams {
@@ -87,7 +87,7 @@ impl Periodic3D {
 
         // Initial dt from CFL
         let cfl_safety = 0.5;
-        let dt = Self::compute_cfl_dt_static(&u_hat, &fft, &grid, cfl_safety, nu);
+        let dt = Self::compute_cfl_dt_static(&u_hat, fft.as_ref(), &grid, cfl_safety, nu);
 
         // Precompute ETD coefficients
         let etd_coeffs = Self::compute_etd_coeffs(&ops, nu, dt);
@@ -101,6 +101,57 @@ impl Periodic3D {
             time: 0.0,
             dt,
             step_count: 0,
+            cfl_safety,
+            fft,
+            fft_padded,
+        }
+    }
+
+    /// Extract checkpoint data for serialisation.
+    pub fn checkpoint_data(&self) -> vonkarman_io::CheckpointData {
+        vonkarman_io::CheckpointData {
+            u_hat: self.u_hat.clone(),
+            time: self.time,
+            step_count: self.step_count,
+            dt: self.dt,
+            grid: self.grid,
+            nu: self.params.nu,
+            config_toml: String::new(), // caller fills this in
+        }
+    }
+
+    /// Reconstruct a solver from checkpoint data.
+    ///
+    /// Recomputes ETD coefficients, SpectralOps, and FFT backends
+    /// from the stored grid, nu, and dt.
+    pub fn from_checkpoint(data: vonkarman_io::CheckpointData, backend_mode: BackendMode) -> Self {
+        let grid = data.grid;
+        let nu = data.nu;
+        let ops = SpectralOps::<f64>::new(&grid);
+
+        let fft = create_backend(grid.nx, grid.ny, grid.nz, backend_mode);
+        let pg = grid.padded_3half();
+        let fft_padded = create_backend(pg.nx, pg.ny, pg.nz, backend_mode);
+
+        let re = if nu > 0.0 { 1.0 / nu } else { f64::INFINITY };
+        let params = PhysicsParams {
+            nu,
+            re,
+            domain: DomainType::Periodic3D,
+        };
+
+        let cfl_safety = 0.5;
+        let etd_coeffs = Self::compute_etd_coeffs(&ops, nu, data.dt);
+
+        Self {
+            u_hat: data.u_hat,
+            ops,
+            etd_coeffs,
+            params,
+            grid,
+            time: data.time,
+            dt: data.dt,
+            step_count: data.step_count,
             cfl_safety,
             fft,
             fft_padded,
@@ -128,7 +179,7 @@ impl Periodic3D {
     /// Compute CFL-based timestep from current velocity field.
     fn compute_cfl_dt_static(
         u_hat: &[Array3<Complex<f64>>; 3],
-        fft: &NdrustfftBackend,
+        fft: &dyn FftBackend<f64>,
         grid: &GridSpec,
         safety: f64,
         nu: f64,
@@ -203,8 +254,8 @@ impl Periodic3D {
         // Stage 1: N1 = nonlinear(u_hat)
         compute_nonlinear(
             &self.ops,
-            &self.fft,
-            &self.fft_padded,
+            self.fft.as_ref(),
+            self.fft_padded.as_ref(),
             &self.grid,
             &self.u_hat,
             &mut n1,
@@ -230,8 +281,8 @@ impl Periodic3D {
         }
         compute_nonlinear(
             &self.ops,
-            &self.fft,
-            &self.fft_padded,
+            self.fft.as_ref(),
+            self.fft_padded.as_ref(),
             &self.grid,
             &temp,
             &mut n2,
@@ -257,8 +308,8 @@ impl Periodic3D {
         }
         compute_nonlinear(
             &self.ops,
-            &self.fft,
-            &self.fft_padded,
+            self.fft.as_ref(),
+            self.fft_padded.as_ref(),
             &self.grid,
             &temp,
             &mut n3,
@@ -293,8 +344,8 @@ impl Periodic3D {
         }
         compute_nonlinear(
             &self.ops,
-            &self.fft,
-            &self.fft_padded,
+            self.fft.as_ref(),
+            self.fft_padded.as_ref(),
             &self.grid,
             &temp,
             &mut n4,
@@ -333,7 +384,7 @@ impl Domain<f64> for Periodic3D {
         // Adaptive dt
         let new_dt = Self::compute_cfl_dt_static(
             &self.u_hat,
-            &self.fft,
+            self.fft.as_ref(),
             &self.grid,
             self.cfl_safety,
             self.params.nu,
@@ -518,7 +569,7 @@ impl Domain<f64> for Periodic3D {
     fn cfl_dt(&self) -> f64 {
         Self::compute_cfl_dt_static(
             &self.u_hat,
-            &self.fft,
+            self.fft.as_ref(),
             &self.grid,
             self.cfl_safety,
             self.params.nu,
@@ -576,7 +627,7 @@ mod tests {
         let n = 16;
         let nu = 0.01;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen);
+        let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
 
         let e0 = solver.energy();
         assert!(e0 > 0.0, "initial energy should be positive");
@@ -603,7 +654,7 @@ mod tests {
         let n = 32;
         let nu = 0.01;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen);
+        let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
 
         let e0 = solver.energy();
         while solver.time() < 0.5 {
@@ -617,5 +668,40 @@ mod tests {
             rel_err < 0.1,
             "energy at t={t}: got {e}, expected ~{expected} (rel_err={rel_err})"
         );
+    }
+
+    #[test]
+    fn from_checkpoint_matches_continuous() {
+        let n = 16;
+        let nu = 0.01;
+        let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+
+        // Run 100 steps continuously
+        let mut continuous = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        for _ in 0..100 {
+            continuous.step();
+        }
+
+        // Run 50 steps, checkpoint, restart, run 50 more
+        let mut first_half = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        for _ in 0..50 {
+            first_half.step();
+        }
+        let checkpoint = first_half.checkpoint_data();
+        let mut restarted = Periodic3D::from_checkpoint(checkpoint, BackendMode::Cpu);
+        for _ in 0..50 {
+            restarted.step();
+        }
+
+        // Bitwise comparison
+        for c in 0..3 {
+            assert_eq!(
+                continuous.u_hat()[c],
+                restarted.u_hat()[c],
+                "u_hat[{c}] diverged after restart"
+            );
+        }
+        assert_eq!(continuous.time(), restarted.time());
+        assert_eq!(continuous.step_count(), restarted.step_count());
     }
 }

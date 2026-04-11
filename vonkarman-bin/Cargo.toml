@@ -16,7 +16,9 @@ vonkarman-periodic = { workspace = true }
 vonkarman-diag = { workspace = true }
 ndarray = { workspace = true }
 serde = { workspace = true }
+vonkarman-io = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
