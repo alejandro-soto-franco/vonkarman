@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Taylor-Green vortex Re=1600 using Dedalus v3.
 
-Dedalus has no built-in TG example, so we write the IVP from scratch
-using three Fourier bases on [0, 2*pi]^3.
+Uses the Dedalus v3 symbolic PDE interface with RealFourier bases.
 """
 import os
 import sys
@@ -10,7 +9,6 @@ import time
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-VENV = os.path.join(SCRIPT_DIR, ".venv")
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "..", "results")
 
 
@@ -24,8 +22,9 @@ def main():
     out_path = os.path.join(RESULTS_DIR, "dedalus.csv")
 
     # Activate venv
-    if os.path.exists(VENV):
-        activate = os.path.join(VENV, "bin", "activate_this.py")
+    venv = os.path.join(SCRIPT_DIR, ".venv")
+    if os.path.exists(venv):
+        activate = os.path.join(venv, "bin", "activate_this.py")
         if os.path.exists(activate):
             exec(open(activate).read(), {"__file__": activate})
 
@@ -35,8 +34,9 @@ def main():
         print("Dedalus not installed. Run setup.sh first.", file=sys.stderr)
         sys.exit(1)
 
-    # Domain
     Lx = Ly = Lz = 2 * np.pi
+
+    # Coordinates and bases
     coords = d3.CartesianCoordinates("x", "y", "z")
     dist = d3.Distributor(coords, dtype=np.float64)
     xbasis = d3.RealFourier(coords["x"], size=N, bounds=(0, Lx), dealias=3 / 2)
@@ -48,13 +48,23 @@ def main():
     p = dist.Field(name="p", bases=(xbasis, ybasis, zbasis))
     tau_p = dist.Field(name="tau_p")
 
-    # Problem: incompressible NS
-    problem = d3.IVP([u, p, tau_p], namespace=locals())
-    problem.add_equation("dt(u) + grad(p) - nu*lap(u) = -u@grad(u)")
+    # Viscosity as a scalar Field
+    nu_f = dist.Field(name="nu_f")
+    nu_f["g"] = nu
+
+    # Build the IVP with explicit namespace (avoid leaking Python floats)
+    ns = {
+        "u": u,
+        "p": p,
+        "tau_p": tau_p,
+        "nu_f": nu_f,
+    }
+    problem = d3.IVP([u, p, tau_p], namespace=ns)
+    problem.add_equation("dt(u) + grad(p) - nu_f*lap(u) = -dot(u, grad(u))")
     problem.add_equation("div(u) + tau_p = 0")
     problem.add_equation("integ(p) = 0")
 
-    # Solver
+    # Solver with RK443
     solver = problem.build_solver(d3.RK443)
     solver.stop_sim_time = T
 
@@ -64,7 +74,9 @@ def main():
     u["g"][1] = -np.cos(x) * np.sin(y) * np.cos(z)
     u["g"][2] = 0.0
 
-    # Diagnostics
+    # Energy integrand
+    vol = Lx * Ly * Lz
+
     records = []
 
     print(f"Running Dedalus TG Re=1600 N={N}...")
@@ -73,16 +85,18 @@ def main():
     while solver.proceed:
         solver.step(dt)
         if solver.iteration % 100 == 0:
-            E = 0.5 * d3.Integrate(u @ u).evaluate()["g"].flat[0] / (Lx * Ly * Lz)
+            u.change_scales(1)
+            E = 0.5 * d3.Integrate(d3.dot(u, u)).evaluate()["g"].flat[0] / vol
             t = solver.sim_time
             records.append((t, E, 0.0, 0.0, 0.0))
             if solver.iteration % 1000 == 0:
-                print(f"  t={t:.3f}, E={E:.8e}")
+                elapsed = time.time() - wall_start
+                print(f"  t={t:.3f}, E={E:.8e}, wall={elapsed:.0f}s")
 
     wall_time = time.time() - wall_start
-    print(f"Done in {wall_time:.1f}s")
+    print(f"Done in {wall_time:.1f}s ({solver.iteration} steps)")
 
-    data = np.array(records)
+    data = np.array(records) if records else np.zeros((0, 5))
     np.savetxt(
         out_path,
         data,
@@ -90,7 +104,7 @@ def main():
         header="t,E,Omega,epsilon,max_omega",
         comments="",
     )
-    print(f"Written: {out_path}")
+    print(f"Written: {out_path} ({len(data)} rows)")
 
 
 if __name__ == "__main__":
