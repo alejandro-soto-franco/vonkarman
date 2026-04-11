@@ -1,57 +1,53 @@
 #!/usr/bin/env python3
-"""Parse hit3d diagnostic output into normalised CSV.
+"""Parse hit3d stat1.gp diagnostic output into normalised CSV.
 
-hit3d writes diagnostic data to ASCII files. The exact format depends
-on the version. This script will need adaptation after inspecting actual output.
+stat1.gp columns: itime, time, energy, dissipation(eps_v), eta, enstrophy, Re_lambda
+Format: i8, 20e15.6
 
 Output: ../results/hit3d.csv with columns: t,E,Omega,epsilon,max_omega
 """
-import sys
 import os
-import glob
+import sys
 import numpy as np
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "..", "results")
 
-def parse_hit3d_output(run_dir: str) -> np.ndarray:
-    """Parse hit3d output files and return (t, E, Omega, epsilon, max_omega) array."""
-    # Look for diagnostic output files (common names across hit3d versions)
-    candidates = glob.glob(os.path.join(run_dir, "*.txt"))
-    candidates += glob.glob(os.path.join(run_dir, "*.dat"))
 
-    if not candidates:
-        print(f"No output files found in {run_dir}", file=sys.stderr)
-        print(f"Available files: {os.listdir(run_dir)}", file=sys.stderr)
+def main():
+    stat_path = os.path.join(SCRIPT_DIR, "stat1.gp")
+    if not os.path.exists(stat_path):
+        print(f"stat1.gp not found in {SCRIPT_DIR}", file=sys.stderr)
+        print("Run run.sh first.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Found output files: {[os.path.basename(f) for f in candidates]}")
+    # Parse stat1.gp: skip comment lines, read fixed-width columns
+    rows = []
+    with open(stat_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 6:
+                try:
+                    itime = int(parts[0])
+                    t = float(parts[1])
+                    E = float(parts[2])
+                    eps = float(parts[3])
+                    eta = float(parts[4])
+                    Omega = float(parts[5])
+                    rows.append((t, E, Omega, eps, 0.0))
+                except (ValueError, IndexError):
+                    continue
 
-    # Try to find the main diagnostics file
-    for path in candidates:
-        try:
-            data = np.loadtxt(path, comments="#")
-            if data.ndim == 2 and data.shape[1] >= 2:
-                print(f"Parsed: {path} ({data.shape[0]} rows, {data.shape[1]} columns)")
-                # Pad to 5 columns if needed
-                if data.shape[1] < 5:
-                    padded = np.zeros((data.shape[0], 5))
-                    padded[:, : data.shape[1]] = data
-                    data = padded
-                return data[:, :5]
-        except (ValueError, OSError):
-            continue
+    if not rows:
+        print("No valid data rows found in stat1.gp", file=sys.stderr)
+        sys.exit(1)
 
-    print("Could not parse any output file", file=sys.stderr)
-    sys.exit(1)
-
-
-if __name__ == "__main__":
-    run_dir = os.path.dirname(os.path.abspath(__file__))
-    results_dir = os.path.join(run_dir, "..", "results")
-    os.makedirs(results_dir, exist_ok=True)
-
-    data = parse_hit3d_output(run_dir)
-
-    out_path = os.path.join(results_dir, "hit3d.csv")
+    data = np.array(rows)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    out_path = os.path.join(RESULTS_DIR, "hit3d.csv")
     np.savetxt(
         out_path,
         data,
@@ -59,4 +55,11 @@ if __name__ == "__main__":
         header="t,E,Omega,epsilon,max_omega",
         comments="",
     )
-    print(f"Written: {out_path}")
+    print(f"Written: {out_path} ({len(data)} rows)")
+    print(f"  t = [{data[0,0]:.3f}, {data[-1,0]:.3f}]")
+    print(f"  E = [{data[:,1].min():.6e}, {data[:,1].max():.6e}]")
+    print(f"  peak Omega = {data[:,2].max():.6e} at t = {data[data[:,2].argmax(), 0]:.3f}")
+
+
+if __name__ == "__main__":
+    main()
