@@ -1,5 +1,6 @@
 use vonkarman_core::domain::Domain;
 use vonkarman_core::field::GridSpec;
+use vonkarman_fft::BackendMode;
 use vonkarman_periodic::{IcType, Periodic3D};
 
 #[test]
@@ -7,7 +8,7 @@ fn taylor_green_re100_energy_conservation() {
     let n = 16;
     let nu = 0.01;
     let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-    let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen);
+    let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
 
     let e0 = solver.energy();
     assert!(e0 > 0.0);
@@ -55,7 +56,7 @@ fn taylor_green_diagnostics_consistency() {
     let n = 16;
     let nu = 0.01;
     let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-    let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen);
+    let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
 
     for _ in 0..20 {
         solver.step();

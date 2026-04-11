@@ -1,0 +1,24 @@
+[run]
+name = "tg-re1600-benchmark"
+output_dir = "../results/vonkarman_output"
+
+[domain]
+type = "periodic3d"
+n = 128
+backend = "cpu"
+
+[physics]
+nu = 6.25e-4
+
+[initial_condition]
+type = "taylor-green"
+
+[commit_cycle]
+diagnostics_interval = 1
+checkpoint_interval = 0
+
+[diagnostics]
+conservation_audit = true
+
+[termination]
+max_time = 10.0

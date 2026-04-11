@@ -31,6 +31,13 @@ pub struct DomainConfig {
     /// Domain length (default: 2*pi).
     #[serde(default = "default_domain_length")]
     pub l: f64,
+    /// FFT backend: "auto" (default), "cufft", or "cpu".
+    #[serde(default = "default_backend")]
+    pub backend: String,
+}
+
+fn default_backend() -> String {
+    "auto".to_string()
 }
 
 fn default_domain_length() -> f64 {
@@ -137,6 +144,55 @@ max_steps = 1000
         assert_eq!(cfg.domain.n, 64);
         assert!((cfg.physics.nu - 6.25e-4).abs() < 1e-10);
         assert_eq!(cfg.termination.max_steps, Some(1000));
+    }
+
+    #[test]
+    fn parse_config_with_backend() {
+        let toml_str = r#"
+[run]
+name = "test"
+output_dir = "./output/test"
+
+[domain]
+type = "periodic3d"
+n = 64
+backend = "cufft"
+
+[physics]
+nu = 1e-3
+
+[initial_condition]
+type = "taylor-green"
+
+[termination]
+max_steps = 10
+"#;
+        let cfg: ExperimentConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.domain.backend, "cufft");
+    }
+
+    #[test]
+    fn parse_config_default_backend() {
+        let toml_str = r#"
+[run]
+name = "test"
+output_dir = "./output/test"
+
+[domain]
+type = "periodic3d"
+n = 64
+
+[physics]
+nu = 1e-3
+
+[initial_condition]
+type = "taylor-green"
+
+[termination]
+max_steps = 10
+"#;
+        let cfg: ExperimentConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.domain.backend, "auto");
     }
 
     #[test]
