@@ -118,7 +118,7 @@ pub fn run(
                 audit.check_diagnostics(&diag, nu);
             }
 
-            if step % 100 == 0 {
+            if step.is_multiple_of(100) {
                 info!(
                     step = step,
                     time = time,
