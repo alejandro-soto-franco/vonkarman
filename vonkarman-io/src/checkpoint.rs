@@ -186,7 +186,7 @@ mod tests {
 
         let data = CheckpointData {
             u_hat: u_hat.clone(),
-            time: 3.14159,
+            time: 1.23456,
             step_count: 12345,
             dt: 0.00789,
             grid,
