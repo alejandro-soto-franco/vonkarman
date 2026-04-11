@@ -215,7 +215,12 @@ mod tests {
         audit.check_full(1.0, 10.0, 0.01, 0.01, 0.0, 1e-14);
         audit.check_full(0.9, 9.0, 0.01, 0.01, 0.0, 1e-14);
         // Only energy monotonicity checked here (budget may flag due to artificial data)
-        assert!(!audit.violations.iter().any(|v| matches!(v, Violation::EnergyIncrease { .. })));
+        assert!(
+            !audit
+                .violations
+                .iter()
+                .any(|v| matches!(v, Violation::EnergyIncrease { .. }))
+        );
     }
 
     #[test]
@@ -223,34 +228,48 @@ mod tests {
         let mut audit = ConservationAudit::new();
         audit.check_full(1.0, 10.0, 0.01, 0.01, 0.0, 1e-14);
         audit.check_full(1.1, 10.0, 0.01, 0.01, 0.0, 1e-14);
-        assert!(audit.violations.iter().any(|v| matches!(v, Violation::EnergyIncrease { .. })));
+        assert!(
+            audit
+                .violations
+                .iter()
+                .any(|v| matches!(v, Violation::EnergyIncrease { .. }))
+        );
     }
 
     #[test]
     fn audit_catches_nan() {
         let mut audit = ConservationAudit::new();
         audit.check_full(f64::NAN, 0.0, 0.01, 0.01, 0.0, 1e-14);
-        assert!(audit.violations.iter().any(|v| matches!(v, Violation::NanDetected { .. })));
+        assert!(
+            audit
+                .violations
+                .iter()
+                .any(|v| matches!(v, Violation::NanDetected { .. }))
+        );
     }
 
     #[test]
     fn audit_catches_divergence_violation() {
         let mut audit = ConservationAudit::new();
         audit.check_full(1.0, 10.0, 0.01, 0.01, 1.0, 1e-14);
-        assert!(audit
-            .violations
-            .iter()
-            .any(|v| matches!(v, Violation::DivergenceViolation { .. })));
+        assert!(
+            audit
+                .violations
+                .iter()
+                .any(|v| matches!(v, Violation::DivergenceViolation { .. }))
+        );
     }
 
     #[test]
     fn audit_catches_parseval_violation() {
         let mut audit = ConservationAudit::new();
         audit.check_full(1.0, 10.0, 0.01, 0.01, 0.0, 0.1);
-        assert!(audit
-            .violations
-            .iter()
-            .any(|v| matches!(v, Violation::ParsevalViolation { .. })));
+        assert!(
+            audit
+                .violations
+                .iter()
+                .any(|v| matches!(v, Violation::ParsevalViolation { .. }))
+        );
     }
 
     #[test]

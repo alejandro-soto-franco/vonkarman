@@ -1,0 +1,45 @@
+======================================================================
+INPUT FILE FOR TAYLOR-GREEN VORTEX Re=1600, N=256
+======================================================================
+256 256 256     dimensions of the grid
+----------------------------------------------------------------------
+000000          ITMIN    first timestep (0 = new simulation)
+999999          ITMAX    last timestep
+100             IPRNT1   how often to calculate statistics
+999999          IPRNT2   how often to write restart files
+999999          IWRITE4  how often to write real*4 binary files
+----------------------------------------------------------------------
+10.0            TMAX     the maximum simulation time
+100.0 0         TRESCALE, NRESCALE  rescale time and # of rescales
+0.0             TSCALAR  time when to start moving scalars
+----------------------------------------------------------------------
+0               ITYPV    flow type: 0=decay
+----------------------------------------------------------------------
+1600.0          RE       Reynolds number (1/viscosity)
+-0.001          DT       timestep (negative = fixed dt)
+----------------------------------------------------------------------
+-1              ISPCV1   Initial spectrum type (-1 = Taylor-Green!)
+4               mv1      initial infrared exponent (unused for TG)
+2.0             wm0v1    initial peak wavenumber (unused for TG)
+----------------------------------------------------------------------
+1               force_type    (unused for decay)
+2               KFMAX         (unused for decay)
+0.5             FAMP          (unused for decay)
+----------------------------------------------------------------------
+0               dealias (0: 2/3-rule, 1: phase shift + truncation)
+----------------------------------------------------------------------
+0               det_rand
+67748937.       RN1
+93712139.       RN2
+10765397.       RN3
+----------------------------------------------------------------------
+0               np, number of Lagrangian particles
+1               particle_tracking mechanism
+0.1             time_p
+0.3             particle_filter_size
+----------------------------------------------------------------------
+0               les_model (0=none)
+----------------------------------------------------------------------
+0               nums, # of passive scalars
+----------------------------------------------------------------------
+======================================================================

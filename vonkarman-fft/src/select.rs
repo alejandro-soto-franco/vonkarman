@@ -39,8 +39,8 @@ pub fn create_backend(
 ) -> Box<dyn FftBackend<f64>> {
     match mode {
         BackendMode::Cufft => {
-            let backend = CufftBackend::new(nx, ny, nz)
-                .expect("cuFFT requested but CUDA is unavailable");
+            let backend =
+                CufftBackend::new(nx, ny, nz).expect("cuFFT requested but CUDA is unavailable");
             tracing::info!(backend = "cuFFT", nx, ny, nz, "FFT backend selected");
             Box::new(backend)
         }

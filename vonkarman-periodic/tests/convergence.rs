@@ -48,7 +48,10 @@ fn spectral_convergence_taylor_green() {
         }
 
         let err = energy_error(&solver, nu);
-        eprintln!("N={n:>4}: energy error = {err:.6e} (t={:.4})", solver.time());
+        eprintln!(
+            "N={n:>4}: energy error = {err:.6e} (t={:.4})",
+            solver.time()
+        );
         errors.push((n, err));
     }
 
@@ -93,8 +96,8 @@ fn parseval_identity_all_grid_sizes() {
             for ix in 0..snx {
                 for iy in 0..sny {
                     for iz in 0..snz {
-                        let mag2 = u_hat[c][[ix, iy, iz]].re.powi(2)
-                            + u_hat[c][[ix, iy, iz]].im.powi(2);
+                        let mag2 =
+                            u_hat[c][[ix, iy, iz]].re.powi(2) + u_hat[c][[ix, iy, iz]].im.powi(2);
                         let weight = if iz == 0 || iz == n / 2 { 1.0 } else { 2.0 };
                         e_spectral += weight * mag2;
                     }
