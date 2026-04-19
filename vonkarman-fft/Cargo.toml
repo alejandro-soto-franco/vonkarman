@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "FFT backends for the vonkarman solver"
 
+[features]
+default = []
+# Enable the gpufft-backed CUDA FFT path. Requires the CUDA Toolkit
+# (cufft + cudart) on the build host and an NVIDIA GPU at runtime.
+gpufft-cuda = ["dep:gpufft"]
+
 [dependencies]
 vonkarman-core = { workspace = true }
 ndarray = { workspace = true }
@@ -14,3 +20,4 @@ ndrustfft = "0.5"
 libloading = "0.8"
 thiserror = "2"
 tracing = "0.1"
+gpufft = { path = "../../gpufft/gpufft", optional = true, default-features = false, features = ["cuda"] }
