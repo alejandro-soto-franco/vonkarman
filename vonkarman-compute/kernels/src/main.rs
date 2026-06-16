@@ -271,6 +271,182 @@ mod kernels {
         }
     }
 
+    /// Per-element squared modulus map: `out[i] = re*re + im*im`.
+    ///
+    /// Mirrors the first step of `vonkarman_compute::cuda::CudaBackend::
+    /// sum_norm_sq`: it reads the interleaved complex input `inp` (length `2 n`)
+    /// and writes the real squared modulus of each complex element to `out`
+    /// (length `n`). One thread per complex element `i` reads slots `2 i`,
+    /// `2 i + 1`.
+    ///
+    /// `re*re + im*im` is two products and an add; the fork's FMA contraction
+    /// fuses the trailing product into the add as one `fma.rn.f64` per output
+    /// (`fma(im, im, re*re)`), with no explicit `mul_add` (which would emit a
+    /// libdevice call instead of letting the backend contract).
+    #[kernel]
+    pub fn norm_sq_map(inp: &[f64], mut out: DisjointSlice<f64>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        // `out.len()` is the complex element count `n`; `inp` has length `2 n`,
+        // so guarding on `n` covers both interleaved slots `2 i` and `2 i + 1`.
+        if i < out.len() {
+            let re = inp[2 * i];
+            let im = inp[2 * i + 1];
+            // SAFETY: `i < n` (out.len()) checked above; `i` is a thread-unique
+            // index minted from hardware special registers, so no two threads
+            // write the same slot.
+            unsafe {
+                // re*re + im*im contracts to fma(im, im, re * re).
+                *out.get_unchecked_mut(i) = re * re + im * im;
+            }
+        }
+    }
+
+    /// One pass of a pairwise tree reduction: `out[i] = in[2 i] + in[2 i + 1]`.
+    ///
+    /// Mirrors the device reduction loop in `vonkarman_compute::cuda::
+    /// CudaBackend::sum_norm_sq`. Sums adjacent pairs of the real input `inp`
+    /// (length `in_len`) into `out` (length `(in_len + 1) / 2`). When `in_len`
+    /// is odd the final unpaired element is carried through unchanged. One
+    /// thread per OUTPUT element `i`; launching this repeatedly, halving the
+    /// length each pass, reduces the whole buffer to a single scalar with
+    /// pairwise (`~ eps log2 n`) error.
+    #[kernel]
+    pub fn pairwise_reduce(inp: &[f64], in_len: u64, mut out: DisjointSlice<f64>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < out.len() {
+            let n = in_len as usize;
+            let lo = 2 * i;
+            let hi = 2 * i + 1;
+            // The last output element of an odd-length input has no partner;
+            // carry the single remaining value through unchanged.
+            let v = if hi < n { inp[lo] + inp[hi] } else { inp[lo] };
+            // SAFETY: `i < out.len()` checked above; `lo < n` always holds for
+            // `i < (n + 1) / 2` (out.len()); `i` is a thread-unique index.
+            unsafe {
+                *out.get_unchecked_mut(i) = v;
+            }
+        }
+    }
+
+    /// Spectral zero-pad scatter for 3/2 dealiasing (pure index remap).
+    ///
+    /// Mirrors `vonkarman_compute::ops::pad::zero_pad_inplace` and the host
+    /// `vonkarman_fft::dealiased::zero_pad_spectral`. One thread per SOURCE
+    /// complex element scatters that element into its padded destination
+    /// position, mapping negative `x`/`y` frequencies to the destination tail;
+    /// the `z` axis (R2C half-spectrum) is copied directly. `src` is
+    /// interleaved complex of shape `(snx, sny, snz)` (length `2 snx sny snz`);
+    /// `dst` is interleaved complex of shape `(dnx, dny, dnz)` and MUST be
+    /// pre-zeroed by the caller (the padding region is never written here).
+    /// `nx`/`ny` are the original `N`-grid extents. Pure data movement, so the
+    /// result is bit-identical to the CPU body (no arithmetic on the value).
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn spectral_pad(
+        src: &[f64],
+        snx: u64,
+        sny: u64,
+        snz: u64,
+        dny: u64,
+        dnz: u64,
+        nx: u64,
+        ny: u64,
+        dnx: u64,
+        mut dst: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        let snx = snx as usize;
+        let sny = sny as usize;
+        let snz = snz as usize;
+        let dnx = dnx as usize;
+        let dny = dny as usize;
+        let dnz = dnz as usize;
+        let nx = nx as usize;
+        let ny = ny as usize;
+        let total = snx * sny * snz;
+        if i < total {
+            // Decompose the flat source index into (ix, iy, iz).
+            let iz = i % snz;
+            let iy = (i / snz) % sny;
+            let ix = i / (snz * sny);
+            // Negative-frequency remap along x and y (z is copied direct).
+            let dix = if ix < nx / 2 { ix } else { dnx - (snx - ix) };
+            let diy = if iy < ny / 2 { iy } else { dny - (sny - iy) };
+            let s = 2 * ((ix * sny + iy) * snz + iz);
+            let d = 2 * ((dix * dny + diy) * dnz + iz);
+            // SAFETY: `i < total` so (ix, iy, iz) are in source bounds and `s`,
+            // `s + 1` are valid `src` indices; the remapped (dix, diy, iz) lie
+            // inside the destination grid (the destination is no smaller per
+            // axis), so `d`, `d + 1` are valid `dst` indices; `i` is a
+            // thread-unique source index, so distinct (dix, diy, iz) targets do
+            // not collide.
+            unsafe {
+                *dst.get_unchecked_mut(d) = src[s];
+                *dst.get_unchecked_mut(d + 1) = src[s + 1];
+            }
+        }
+    }
+
+    /// Spectral truncate gather for 3/2 dealiasing (pure index remap).
+    ///
+    /// Mirrors `vonkarman_compute::ops::pad::truncate_inplace` and the host
+    /// `vonkarman_fft::dealiased::truncate_spectral`. One thread per DESTINATION
+    /// complex element gathers the matching source element, mapping negative
+    /// `x`/`y` frequencies back from the source tail; the `z` axis is copied
+    /// directly. `src` is interleaved complex of shape `(snx, sny, snz)`;
+    /// `dst` is interleaved complex of shape `(dnx, dny, dnz)`. Every `dst`
+    /// element is written, so no pre-zero is needed. `nx`/`ny` are the original
+    /// `N`-grid extents. Pure data movement (bit-identical to the CPU body).
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn spectral_truncate(
+        src: &[f64],
+        snx: u64,
+        sny: u64,
+        snz: u64,
+        dny: u64,
+        dnz: u64,
+        nx: u64,
+        ny: u64,
+        dnx: u64,
+        mut dst: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        let snx = snx as usize;
+        let sny = sny as usize;
+        let snz = snz as usize;
+        let dnx = dnx as usize;
+        let dny = dny as usize;
+        let dnz = dnz as usize;
+        let nx = nx as usize;
+        let ny = ny as usize;
+        let total = dnx * dny * dnz;
+        if i < total {
+            // Decompose the flat destination index into (ix, iy, iz).
+            let iz = i % dnz;
+            let iy = (i / dnz) % dny;
+            let ix = i / (dnz * dny);
+            // Negative-frequency remap back from the source tail (z direct).
+            let six = if ix < nx / 2 { ix } else { snx - (dnx - ix) };
+            let siy = if iy < ny / 2 { iy } else { sny - (dny - iy) };
+            let s = 2 * ((six * sny + siy) * snz + iz);
+            let d = 2 * ((ix * dny + iy) * dnz + iz);
+            // SAFETY: `i < total` so (ix, iy, iz) are in destination bounds and
+            // `d`, `d + 1` are valid `dst` indices; the remapped (six, siy, iz)
+            // lie inside the source grid (the source is no smaller per axis), so
+            // `s`, `s + 1` are valid `src` indices; `i` is a thread-unique
+            // destination index, so no two threads write the same slot.
+            unsafe {
+                *dst.get_unchecked_mut(d) = src[s];
+                *dst.get_unchecked_mut(d + 1) = src[s + 1];
+            }
+        }
+    }
+
     /// ETD-RK4 final update, in place on `u`:
     /// `u = exp_full * u + dt * (b1 n1 + b23 (n2 + n3) + b4 n4)`.
     ///

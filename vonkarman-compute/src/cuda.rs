@@ -656,6 +656,310 @@ impl CudaBackend {
         stream.synchronize()
     }
 
+    /// On-device compensated reduction of `|z|^2 = re*re + im*im` over an
+    /// interleaved complex buffer, pulling back only a small scalar tail.
+    ///
+    /// This is the residency-preserving replacement for the old download-then-
+    /// Kahan path. It runs entirely on the device except for a final transfer of
+    /// at most `TAIL` partials:
+    ///
+    /// 1. `norm_sq_map` writes `out[i] = re*re + im*im` (length `n`) from the
+    ///    interleaved input (length `2 n`).
+    /// 2. `pairwise_reduce` halves the length each pass (`out[i] = in[2 i] +
+    ///    in[2 i + 1]`, carrying an odd final element) until at most `TAIL`
+    ///    values remain.
+    /// 3. The `<= TAIL` partials are downloaded and finished with a host Kahan
+    ///    sum (a negligible transfer).
+    ///
+    /// Pairwise summation has error `~ eps log2(n)`, comfortably under `1e-14`
+    /// relative versus the CPU sequential Kahan oracle for `n` up to `256^3`.
+    /// Returns the scalar sum as `f64` (the caller wraps it back into `F`).
+    fn sum_norm_sq_device(&self, buf: &CplxBuf<f64>) -> f64 {
+        // Stop the device tree once the working length is at or below this, then
+        // finish the handful of partials on the host with a compensated sum. A
+        // small tail keeps the device->host transfer negligible.
+        const TAIL: usize = 256;
+
+        let n = buf.len;
+        if n == 0 {
+            return 0.0;
+        }
+
+        let stream = self.ctx.default_stream();
+        let module = self
+            .ctx
+            .load_module_from_ptx_src(ptx::KERNELS)
+            .expect("sum_norm_sq_device: module load failed");
+
+        // Step 1: map |z|^2 into a real device buffer of length n.
+        let mut cur = DeviceBuffer::<f64>::zeroed(&stream, n)
+            .expect("sum_norm_sq_device: map buffer alloc failed");
+        {
+            let func = module
+                .load_function("norm_sq_map")
+                .expect("sum_norm_sq_device: norm_sq_map not found");
+            let mut p_in = buf.buf.cu_deviceptr();
+            let mut l_in = (2 * n) as u64;
+            let mut p_out = cur.cu_deviceptr();
+            let mut l_out = n as u64;
+            let mut params: [*mut std::ffi::c_void; 4] = [
+                &mut p_in as *mut _ as *mut std::ffi::c_void,
+                &mut l_in as *mut _ as *mut std::ffi::c_void,
+                &mut p_out as *mut _ as *mut std::ffi::c_void,
+                &mut l_out as *mut _ as *mut std::ffi::c_void,
+            ];
+            let cfg = LaunchConfig::for_num_elems(n as u32);
+            // SAFETY: `func` comes from a module on `self.ctx`; the stream
+            // belongs to the same context; the 4 params alias the live (ptr,
+            // len) pairs the PTX expects; the grid is sized for `n` complex
+            // elements and the kernel bounds-checks `i < n`. Params outlive the
+            // launch (synchronise below before they drop).
+            unsafe {
+                launch_kernel_on_stream(
+                    &func,
+                    cfg.grid_dim,
+                    cfg.block_dim,
+                    cfg.shared_mem_bytes,
+                    &stream,
+                    &mut params,
+                )
+                .expect("sum_norm_sq_device: norm_sq_map launch failed");
+            }
+            stream
+                .synchronize()
+                .expect("sum_norm_sq_device: map sync failed");
+        }
+
+        // Step 2: pairwise tree reduction, halving the length each pass.
+        let reduce = module
+            .load_function("pairwise_reduce")
+            .expect("sum_norm_sq_device: pairwise_reduce not found");
+        let mut cur_len = n;
+        while cur_len > TAIL {
+            let out_len = cur_len.div_ceil(2);
+            let next = DeviceBuffer::<f64>::zeroed(&stream, out_len)
+                .expect("sum_norm_sq_device: reduce buffer alloc failed");
+            let mut p_in = cur.cu_deviceptr();
+            let mut l_in = cur_len as u64;
+            let mut v_in_len = cur_len as u64;
+            let mut p_out = next.cu_deviceptr();
+            let mut l_out = out_len as u64;
+            let mut params: [*mut std::ffi::c_void; 5] = [
+                &mut p_in as *mut _ as *mut std::ffi::c_void,
+                &mut l_in as *mut _ as *mut std::ffi::c_void,
+                &mut v_in_len as *mut _ as *mut std::ffi::c_void,
+                &mut p_out as *mut _ as *mut std::ffi::c_void,
+                &mut l_out as *mut _ as *mut std::ffi::c_void,
+            ];
+            let cfg = LaunchConfig::for_num_elems(out_len as u32);
+            // SAFETY: as above; 5 params (the `in_len` scalar sits between the
+            // two (ptr, len) pairs), grid sized for `out_len` outputs, kernel
+            // bounds-checks `i < out_len`. `cur` and `next` are distinct
+            // buffers, so the read and write do not alias.
+            unsafe {
+                launch_kernel_on_stream(
+                    &reduce,
+                    cfg.grid_dim,
+                    cfg.block_dim,
+                    cfg.shared_mem_bytes,
+                    &stream,
+                    &mut params,
+                )
+                .expect("sum_norm_sq_device: pairwise_reduce launch failed");
+            }
+            stream
+                .synchronize()
+                .expect("sum_norm_sq_device: reduce sync failed");
+            cur = next;
+            cur_len = out_len;
+        }
+
+        // Step 3: download the small partial tail and finish with host Kahan.
+        let tail = cur
+            .to_host_vec(&stream)
+            .expect("sum_norm_sq_device: tail download failed");
+        let mut sum = 0.0_f64;
+        let mut comp = 0.0_f64;
+        for &term in tail.iter().take(cur_len) {
+            let y = term - comp;
+            let t = sum + y;
+            comp = (t - sum) - y;
+            sum = t;
+        }
+        sum
+    }
+
+    /// Spectral zero-pad scatter for 3/2 dealiasing, over resident device
+    /// buffers (pure index remap, no scaling).
+    ///
+    /// Loads the offline-compiled `spectral_pad` kernel and launches it on the
+    /// default stream, then synchronises. `src` is an interleaved complex buffer
+    /// of shape `(snx, sny, snz)` (length `2 snx sny snz`); `dst` is an
+    /// interleaved complex buffer of shape `(dnx, dny, dnz)` (length
+    /// `2 dnx dny dnz`). `nx`/`ny` are the original `N`-grid extents.
+    ///
+    /// `dst` must be PRE-ZEROED (the kernel scatters from source points only and
+    /// never touches the padding region); [`Self::alloc_cplx`] zeroes on alloc.
+    /// Mirrors [`crate::ops::pad::zero_pad_inplace`]; the result is bit-identical
+    /// to the CPU body (no arithmetic on the copied value).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spectral_pad<F: Float>(
+        &self,
+        src: &CplxBuf<F>,
+        dst: &mut CplxBuf<F>,
+        snx: usize,
+        sny: usize,
+        snz: usize,
+        dnx: usize,
+        dny: usize,
+        dnz: usize,
+        nx: usize,
+        ny: usize,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        debug_assert!(
+            src.buf.len() == 2 * snx * sny * snz && dst.buf.len() == 2 * dnx * dny * dnz,
+            "spectral_pad: src length 2*snx*sny*snz, dst length 2*dnx*dny*dnz"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("spectral_pad")?;
+
+        // Param order matches the kernel: src (ptr, len), then the scalar dims
+        // snx, sny, snz, dny, dnz, nx, ny, dnx, then dst (ptr, len).
+        let mut p_src = src.buf.cu_deviceptr();
+        let mut l_src = src.buf.len() as u64;
+        let mut v_snx = snx as u64;
+        let mut v_sny = sny as u64;
+        let mut v_snz = snz as u64;
+        let mut v_dny = dny as u64;
+        let mut v_dnz = dnz as u64;
+        let mut v_nx = nx as u64;
+        let mut v_ny = ny as u64;
+        let mut v_dnx = dnx as u64;
+        let mut p_dst = dst.buf.cu_deviceptr();
+        let mut l_dst = dst.buf.len() as u64;
+
+        let mut params: [*mut std::ffi::c_void; 12] = [
+            &mut p_src as *mut _ as *mut std::ffi::c_void,
+            &mut l_src as *mut _ as *mut std::ffi::c_void,
+            &mut v_snx as *mut _ as *mut std::ffi::c_void,
+            &mut v_sny as *mut _ as *mut std::ffi::c_void,
+            &mut v_snz as *mut _ as *mut std::ffi::c_void,
+            &mut v_dny as *mut _ as *mut std::ffi::c_void,
+            &mut v_dnz as *mut _ as *mut std::ffi::c_void,
+            &mut v_nx as *mut _ as *mut std::ffi::c_void,
+            &mut v_ny as *mut _ as *mut std::ffi::c_void,
+            &mut v_dnx as *mut _ as *mut std::ffi::c_void,
+            &mut p_dst as *mut _ as *mut std::ffi::c_void,
+            &mut l_dst as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        // One thread per SOURCE complex element.
+        let cfg = LaunchConfig::for_num_elems((snx * sny * snz) as u32);
+        // SAFETY: `func` comes from a module on `self.ctx`; the stream belongs
+        // to the same context; the 12 params alias the live src (ptr, len), the
+        // scalar dims, and the dst (ptr, len) in the order the PTX expects; the
+        // grid is sized for the source point count and the kernel bounds-checks
+        // `i < snx*sny*snz`. `dst` is pre-zeroed by the caller. Params outlive
+        // the launch (synchronise below before they drop).
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
+    /// Spectral truncate gather for 3/2 dealiasing, over resident device
+    /// buffers (pure index remap, no scaling).
+    ///
+    /// Loads the offline-compiled `spectral_truncate` kernel and launches it on
+    /// the default stream, then synchronises. `src` is an interleaved complex
+    /// buffer of shape `(snx, sny, snz)`; `dst` is an interleaved complex buffer
+    /// of shape `(dnx, dny, dnz)`. `nx`/`ny` are the original `N`-grid extents.
+    ///
+    /// Every `dst` element is written (gather), so no pre-zero is needed.
+    /// Mirrors [`crate::ops::pad::truncate_inplace`]; the result is bit-identical
+    /// to the CPU body.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spectral_truncate<F: Float>(
+        &self,
+        src: &CplxBuf<F>,
+        dst: &mut CplxBuf<F>,
+        snx: usize,
+        sny: usize,
+        snz: usize,
+        dnx: usize,
+        dny: usize,
+        dnz: usize,
+        nx: usize,
+        ny: usize,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        debug_assert!(
+            src.buf.len() == 2 * snx * sny * snz && dst.buf.len() == 2 * dnx * dny * dnz,
+            "spectral_truncate: src length 2*snx*sny*snz, dst length 2*dnx*dny*dnz"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("spectral_truncate")?;
+
+        // Param order matches the kernel: src (ptr, len), then the scalar dims
+        // snx, sny, snz, dny, dnz, nx, ny, dnx, then dst (ptr, len).
+        let mut p_src = src.buf.cu_deviceptr();
+        let mut l_src = src.buf.len() as u64;
+        let mut v_snx = snx as u64;
+        let mut v_sny = sny as u64;
+        let mut v_snz = snz as u64;
+        let mut v_dny = dny as u64;
+        let mut v_dnz = dnz as u64;
+        let mut v_nx = nx as u64;
+        let mut v_ny = ny as u64;
+        let mut v_dnx = dnx as u64;
+        let mut p_dst = dst.buf.cu_deviceptr();
+        let mut l_dst = dst.buf.len() as u64;
+
+        let mut params: [*mut std::ffi::c_void; 12] = [
+            &mut p_src as *mut _ as *mut std::ffi::c_void,
+            &mut l_src as *mut _ as *mut std::ffi::c_void,
+            &mut v_snx as *mut _ as *mut std::ffi::c_void,
+            &mut v_sny as *mut _ as *mut std::ffi::c_void,
+            &mut v_snz as *mut _ as *mut std::ffi::c_void,
+            &mut v_dny as *mut _ as *mut std::ffi::c_void,
+            &mut v_dnz as *mut _ as *mut std::ffi::c_void,
+            &mut v_nx as *mut _ as *mut std::ffi::c_void,
+            &mut v_ny as *mut _ as *mut std::ffi::c_void,
+            &mut v_dnx as *mut _ as *mut std::ffi::c_void,
+            &mut p_dst as *mut _ as *mut std::ffi::c_void,
+            &mut l_dst as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        // One thread per DESTINATION complex element.
+        let cfg = LaunchConfig::for_num_elems((dnx * dny * dnz) as u32);
+        // SAFETY: as for spectral_pad; 12 params in the (ptr, len) / scalar
+        // order the PTX expects, grid sized for the destination point count,
+        // kernel bounds-checks `i < dnx*dny*dnz`. Every dst point is written.
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
     /// Reinterprets a generic `F` value as `f64` for the f64-only GPU path.
     ///
     /// `assert_f64::<F>()` guarantees `F == f64` at every call site, so the
@@ -733,24 +1037,16 @@ impl ComputeBackend for CudaBackend {
 
     fn sum_norm_sq<F: Float>(&self, buf: &Self::CplxBuf<F>) -> F {
         assert_f64::<F>();
-        // TODO: on-device reduction. This downloads and reuses the CPU Kahan
-        // reduction, which BREAKS residency (a device->host round trip every
-        // call). A later task replaces it with an on-device reduction kernel.
-        let stream = self.ctx.default_stream();
-        let flat = buf
-            .buf
-            .to_host_vec(&stream)
-            .expect("CudaBackend::sum_norm_sq device copy failed");
-        let mut sum = 0.0_f64;
-        let mut comp = 0.0_f64;
-        for pair in flat.chunks_exact(2) {
-            let term = pair[0] * pair[0] + pair[1] * pair[1];
-            let y = term - comp;
-            let t = sum + y;
-            comp = (t - sum) - y;
-            sum = t;
-        }
-        F::from_f64(sum)
+        // On-device compensated reduction: only a small scalar tail (<= 256
+        // partials) is pulled back to the host, preserving residency. See
+        // `sum_norm_sq_device` for the map + pairwise-tree strategy and its
+        // error bound versus the CPU sequential Kahan oracle.
+        //
+        // SAFETY: `assert_f64::<F>()` above guarantees `F == f64`, and
+        // `CplxBuf<F>` is `CplxBuf<f64>` for that `F` (the only `F`-typed field
+        // is a zero-sized PhantomData), so the reference reinterpret is sound.
+        let buf64: &CplxBuf<f64> = unsafe { &*(buf as *const CplxBuf<F> as *const CplxBuf<f64>) };
+        F::from_f64(self.sum_norm_sq_device(buf64))
     }
 }
 
@@ -1603,6 +1899,200 @@ mod tests {
                 "etd_final twice-rounded mismatch idx {j}: gpu {}, cpu {}, abs {abs:e} > {abs_tol:e}",
                 gu[j],
                 cpu[j]
+            );
+        }
+    }
+
+    #[test]
+    fn sum_norm_sq_device_matches_cpu_kahan() {
+        use crate::cpu::CpuBackend;
+        use vonkarman_core::ComputeBackend;
+
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+        let cpu = CpuBackend::new();
+
+        // Several sizes including non-powers-of-2 (so the pairwise tree's odd-
+        // length carry is exercised) and sizes above the host-tail cutoff so the
+        // device tree actually runs multiple passes (TAIL = 256).
+        for &n in &[1usize, 2, 3, 255, 257, 1000, 4095, 32768, 65537] {
+            // Deterministic pseudo-random complex field with non-trivial
+            // mantissas so the reduction order genuinely matters.
+            let host: Vec<Complex<f64>> = (0..n)
+                .map(|i| {
+                    let t = 0.013 * i as f64;
+                    Complex::new(t.sin() * 1.7 + 0.3, (t * 1.3).cos() * 1.1 - 0.2)
+                })
+                .collect();
+
+            // CPU sequential Kahan oracle.
+            let mut cbuf = cpu.alloc_cplx::<f64>(n);
+            cpu.upload_cplx(&host, &mut cbuf);
+            let want = cpu.sum_norm_sq::<f64>(&cbuf);
+
+            // GPU on-device reduction (pulls only a small scalar tail).
+            let mut dev = be.alloc_cplx::<f64>(n);
+            be.upload_cplx(&host, &mut dev);
+            let got = be.sum_norm_sq::<f64>(&dev);
+
+            // Pairwise summation error is ~ eps log2(n), so 1e-14 relative holds
+            // with comfortable head-room at every size here. `want` is strictly
+            // positive (a sum of squares with a non-zero field), so a relative
+            // bound is well defined.
+            let rel = (got - want).abs() / want.abs().max(f64::MIN_POSITIVE);
+            assert!(
+                rel <= 1e-14,
+                "sum_norm_sq device vs CPU Kahan mismatch at n={n}: gpu {got}, cpu {want}, rel {rel:e}"
+            );
+        }
+    }
+
+    /// Build the flat interleaved host source and CPU-oracle padded/truncated
+    /// destination for a pad/truncate differential test, plus the dst dims.
+    fn pad_inputs(n: usize) -> (GridSpecDims, Vec<f64>) {
+        let grid = vonkarman_core::field::GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+        let pg = grid.padded_3half();
+        let (snx, sny, snz) = grid.spectral_shape();
+        let (pnx, pny, pnz) = pg.spectral_shape();
+        // Deterministic pseudo-random interleaved complex N-grid field.
+        let src: Vec<f64> = (0..2 * snx * sny * snz)
+            .map(|j| (0.017 * j as f64).sin() * 1.6 + 0.25)
+            .collect();
+        (
+            GridSpecDims {
+                snx,
+                sny,
+                snz,
+                pnx,
+                pny,
+                pnz,
+                nx: grid.nx,
+                ny: grid.ny,
+            },
+            src,
+        )
+    }
+
+    /// Grid dimensions for the pad/truncate differential tests.
+    struct GridSpecDims {
+        snx: usize,
+        sny: usize,
+        snz: usize,
+        pnx: usize,
+        pny: usize,
+        pnz: usize,
+        nx: usize,
+        ny: usize,
+    }
+
+    #[test]
+    fn spectral_pad_matches_cpu_body_bit_exact() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+        let (d, src) = pad_inputs(8);
+
+        // CPU body oracle.
+        let mut cpu_dst = vec![0.0; 2 * d.pnx * d.pny * d.pnz];
+        crate::ops::pad::zero_pad_inplace::<f64>(
+            &src,
+            &mut cpu_dst,
+            d.snx,
+            d.sny,
+            d.snz,
+            d.pnx,
+            d.pny,
+            d.pnz,
+            d.nx,
+            d.ny,
+        );
+
+        // GPU path on resident buffers. Upload the N-grid source as a complex
+        // buffer; the padded dst is zeroed by alloc_cplx (the scatter relies on
+        // that for the padding region).
+        let src_real = be.upload_real::<f64>(&src);
+        let csrc = CplxBuf::<f64> {
+            buf: src_real.buf,
+            len: d.snx * d.sny * d.snz,
+            _marker: std::marker::PhantomData,
+        };
+        let mut cdst = be.alloc_cplx::<f64>(d.pnx * d.pny * d.pnz);
+        be.spectral_pad::<f64>(
+            &csrc, &mut cdst, d.snx, d.sny, d.snz, d.pnx, d.pny, d.pnz, d.nx, d.ny,
+        )
+        .expect("GPU spectral_pad launch failed");
+
+        let mut host = vec![Complex::new(0.0_f64, 0.0); d.pnx * d.pny * d.pnz];
+        be.download_cplx(&cdst, &mut host);
+        let mut gpu = Vec::with_capacity(2 * host.len());
+        for c in &host {
+            gpu.push(c.re);
+            gpu.push(c.im);
+        }
+
+        // Pure data movement: the GPU result must be BIT-IDENTICAL to the CPU.
+        assert_eq!(gpu.len(), cpu_dst.len());
+        for (j, (g, c)) in gpu.iter().zip(cpu_dst.iter()).enumerate() {
+            assert_eq!(
+                g, c,
+                "spectral_pad mismatch at flat idx {j}: gpu {g}, cpu {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn spectral_truncate_matches_cpu_body_bit_exact() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+        let (d, _) = pad_inputs(8);
+        // Padded-grid source for truncation: shape (pnx, pny, pnz).
+        let src: Vec<f64> = (0..2 * d.pnx * d.pny * d.pnz)
+            .map(|j| (0.011 * j as f64).cos() * 1.4 - 0.15)
+            .collect();
+
+        // CPU body oracle (truncate padded -> N grid).
+        let mut cpu_dst = vec![0.0; 2 * d.snx * d.sny * d.snz];
+        crate::ops::pad::truncate_inplace::<f64>(
+            &src,
+            &mut cpu_dst,
+            d.pnx,
+            d.pny,
+            d.pnz,
+            d.snx,
+            d.sny,
+            d.snz,
+            d.nx,
+            d.ny,
+        );
+
+        // GPU path on resident buffers.
+        let src_real = be.upload_real::<f64>(&src);
+        let csrc = CplxBuf::<f64> {
+            buf: src_real.buf,
+            len: d.pnx * d.pny * d.pnz,
+            _marker: std::marker::PhantomData,
+        };
+        let mut cdst = be.alloc_cplx::<f64>(d.snx * d.sny * d.snz);
+        be.spectral_truncate::<f64>(
+            &csrc, &mut cdst, d.pnx, d.pny, d.pnz, d.snx, d.sny, d.snz, d.nx, d.ny,
+        )
+        .expect("GPU spectral_truncate launch failed");
+
+        let mut host = vec![Complex::new(0.0_f64, 0.0); d.snx * d.sny * d.snz];
+        be.download_cplx(&cdst, &mut host);
+        let mut gpu = Vec::with_capacity(2 * host.len());
+        for c in &host {
+            gpu.push(c.re);
+            gpu.push(c.im);
+        }
+
+        assert_eq!(gpu.len(), cpu_dst.len());
+        for (j, (g, c)) in gpu.iter().zip(cpu_dst.iter()).enumerate() {
+            assert_eq!(
+                g, c,
+                "spectral_truncate mismatch at flat idx {j}: gpu {g}, cpu {c}"
             );
         }
     }
