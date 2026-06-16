@@ -302,6 +302,34 @@ mod kernels {
         }
     }
 
+    /// Real-scalar scaling of an interleaved-complex buffer, in place.
+    ///
+    /// Mirrors `vonkarman_compute::ops::scale::scale_cplx_inplace`. Multiplies
+    /// every `f64` of the interleaved-complex buffer `buf`
+    /// (`[re0, im0, re1, im1, ...]`, length `2 n`) by the real scalar `s`. The
+    /// scalar is real, so both interleaved slots of each complex element take the
+    /// identical multiply; one thread per `f64` element does one multiply. Pure
+    /// pointwise multiply (a single rounding, no products to fuse), so no
+    /// `mul_add` and no contraction opportunity. The dealiasing path uses this to
+    /// apply its `1/N` (before the inverse transform) and `N/N_padded` (after the
+    /// forward transform) amplitude factors on device.
+    #[kernel]
+    pub fn scale_cplx(mut buf: DisjointSlice<f64>, s: f64) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        // One thread per f64 element (length 2 n); the real scalar applies to
+        // both the real and imaginary interleaved slots identically.
+        if i < buf.len() {
+            // SAFETY: `i < buf.len()` checked above; `i` is a thread-unique
+            // index minted from hardware special registers, so no two threads
+            // write the same slot.
+            unsafe {
+                let v = *buf.get_unchecked_mut(i);
+                *buf.get_unchecked_mut(i) = v * s;
+            }
+        }
+    }
+
     /// One pass of a pairwise tree reduction: `out[i] = in[2 i] + in[2 i + 1]`.
     ///
     /// Mirrors the device reduction loop in `vonkarman_compute::cuda::

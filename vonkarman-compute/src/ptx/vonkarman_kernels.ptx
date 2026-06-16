@@ -376,6 +376,40 @@ $L__BB3_2:                              // %bb10
 	ret;
                                         // -- End function
 }
+	// .globl	scale_cplx              // -- Begin function scale_cplx
+.visible .entry scale_cplx(
+	.param .u64 .ptr .align 1 scale_cplx_param_0,
+	.param .u64 scale_cplx_param_1,
+	.param .f64 scale_cplx_param_2
+)                                       // @scale_cplx
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<12>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd3, [scale_cplx_param_0];
+	cvta.to.global.u64 	%rd4, %rd3;
+	ld.param.b64 	%rd5, [scale_cplx_param_1];
+	mov.u32 	%r1, %tid.x;
+	cvt.u64.u32 	%rd6, %r1;
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mul.wide.u32 	%rd7, %r2, %r3;
+	add.s64 	%rd8, %rd7, %rd6;
+	setp.ge.u64 	%p1, %rd8, %rd5;
+	@%p1 bra 	$L__BB4_2;
+// %bb.1:                               // %bb2
+	ld.param.b64 	%rd2, [scale_cplx_param_2];
+	shl.b64 	%rd9, %rd8, 3;
+	add.s64 	%rd1, %rd4, %rd9;
+	ld.global.b64 	%rd10, [%rd1];
+	mul.f64 	%rd11, %rd2, %rd10;
+	st.global.b64 	[%rd1], %rd11;
+$L__BB4_2:                              // %bb4
+	ret;
+                                        // -- End function
+}
 	// .globl	norm_sq_map             // -- Begin function norm_sq_map
 .visible .entry norm_sq_map(
 	.param .u64 .ptr .align 1 norm_sq_map_param_0,
@@ -401,7 +435,7 @@ $L__BB3_2:                              // %bb10
 	mul.wide.u32 	%rd8, %r2, %r3;
 	add.s64 	%rd3, %rd8, %rd7;
 	setp.ge.u64 	%p1, %rd3, %rd6;
-	@%p1 bra 	$L__BB4_2;
+	@%p1 bra 	$L__BB5_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd9, %rd3, 4;
 	add.s64 	%rd10, %rd1, %rd9;
@@ -412,7 +446,7 @@ $L__BB3_2:                              // %bb10
 	add.s64 	%rd15, %rd2, %rd14;
 	fma.rn.f64 	%rd16, %rd11, %rd11, %rd13;
 	st.global.b64 	[%rd15], %rd16;
-$L__BB4_2:                              // %bb6
+$L__BB5_2:                              // %bb6
 	ret;
                                         // -- End function
 }
@@ -469,7 +503,7 @@ $L__BB4_2:                              // %bb6
 	mul.wide.u32 	%rd22, %r2, %r3;
 	add.s64 	%rd10, %rd22, %rd21;
 	setp.ge.u64 	%p1, %rd10, %rd18;
-	@%p1 bra 	$L__BB5_2;
+	@%p1 bra 	$L__BB6_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd23, %rd10, 3;
 	add.s64 	%rd24, %rd1, %rd23;
@@ -518,7 +552,7 @@ $L__BB4_2:                              // %bb6
 	neg.f64 	%rd62, %rd61;
 	fma.rn.f64 	%rd63, %rd25, %rd35, %rd62;
 	st.global.b64 	[%rd59+8], %rd63;
-$L__BB5_2:                              // %bb11
+$L__BB6_2:                              // %bb11
 	ret;
                                         // -- End function
 }
@@ -548,29 +582,29 @@ $L__BB5_2:                              // %bb11
 	mul.wide.u32 	%rd10, %r2, %r3;
 	add.s64 	%rd3, %rd10, %rd8;
 	setp.ge.u64 	%p1, %rd3, %rd9;
-	@%p1 bra 	$L__BB6_5;
+	@%p1 bra 	$L__BB7_5;
 // %bb.1:                               // %bb2
 	ld.param.b64 	%rd5, [pairwise_reduce_param_2];
 	shl.b64 	%rd4, %rd3, 1;
 	or.b64 	%rd11, %rd4, 1;
 	setp.ge.u64 	%p2, %rd11, %rd5;
-	@%p2 bra 	$L__BB6_3;
+	@%p2 bra 	$L__BB7_3;
 // %bb.2:                               // %bb3
 	shl.b64 	%rd14, %rd4, 3;
 	add.s64 	%rd15, %rd1, %rd14;
 	ld.global.b64 	%rd16, [%rd15];
 	ld.global.b64 	%rd17, [%rd15+8];
 	add.f64 	%rd20, %rd16, %rd17;
-	bra.uni 	$L__BB6_4;
-$L__BB6_3:                              // %bb6
+	bra.uni 	$L__BB7_4;
+$L__BB7_3:                              // %bb6
 	shl.b64 	%rd12, %rd4, 3;
 	add.s64 	%rd13, %rd1, %rd12;
 	ld.global.b64 	%rd20, [%rd13];
-$L__BB6_4:                              // %bb8
+$L__BB7_4:                              // %bb8
 	shl.b64 	%rd18, %rd3, 3;
 	add.s64 	%rd19, %rd2, %rd18;
 	st.global.b64 	[%rd19], %rd20;
-$L__BB6_5:                              // %bb10
+$L__BB7_5:                              // %bb10
 	ret;
                                         // -- End function
 }
@@ -628,7 +662,7 @@ $L__BB6_5:                              // %bb10
 	mul.wide.u32 	%rd23, %r2, %r3;
 	add.s64 	%rd10, %rd23, %rd22;
 	setp.ge.u64 	%p1, %rd10, %rd13;
-	@%p1 bra 	$L__BB7_2;
+	@%p1 bra 	$L__BB8_2;
 // %bb.1:                               // %bb2
 	ld.param.b64 	%rd11, [etd_final_param_8];
 	shl.b64 	%rd24, %rd10, 3;
@@ -670,7 +704,7 @@ $L__BB6_5:                              // %bb10
 	mul.f64 	%rd59, %rd11, %rd56;
 	fma.rn.f64 	%rd60, %rd26, %rd36, %rd59;
 	st.global.b64 	[%rd34+8], %rd60;
-$L__BB7_2:                              // %bb14
+$L__BB8_2:                              // %bb14
 	ret;
                                         // -- End function
 }
@@ -727,7 +761,7 @@ $L__BB7_2:                              // %bb14
 	mul.wide.u32 	%rd22, %r2, %r3;
 	add.s64 	%rd10, %rd22, %rd20;
 	setp.ge.u64 	%p1, %rd10, %rd21;
-	@%p1 bra 	$L__BB8_2;
+	@%p1 bra 	$L__BB9_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd23, %rd10, 3;
 	add.s64 	%rd24, %rd1, %rd23;
@@ -757,7 +791,7 @@ $L__BB7_2:                              // %bb14
 	neg.f64 	%rd46, %rd44;
 	fma.rn.f64 	%rd47, %rd31, %rd39, %rd46;
 	st.global.b64 	[%rd45], %rd47;
-$L__BB8_2:                              // %bb10
+$L__BB9_2:                              // %bb10
 	ret;
                                         // -- End function
 }
@@ -806,13 +840,13 @@ $L__BB8_2:                              // %bb10
 	mul.wide.u32 	%rd19, %r2, %r3;
 	add.s64 	%rd8, %rd19, %rd18;
 	setp.ge.u64 	%p1, %rd8, %rd12;
-	@%p1 bra 	$L__BB9_3;
+	@%p1 bra 	$L__BB10_3;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd20, %rd8, 3;
 	add.s64 	%rd21, %rd1, %rd20;
 	ld.global.b64 	%rd9, [%rd21];
 	setp.ltu.f64 	%p2, %rd9, 0d39B4484BFEEBC2A0;
-	@%p2 bra 	$L__BB9_3;
+	@%p2 bra 	$L__BB10_3;
 // %bb.2:                               // %bb4
 	add.s64 	%rd22, %rd2, %rd20;
 	ld.global.b64 	%rd23, [%rd22];
@@ -855,7 +889,7 @@ $L__BB8_2:                              // %bb10
 	st.global.b64 	[%rd36], %rd55;
 	fma.rn.f64 	%rd56, %rd54, %rd44, %rd38;
 	st.global.b64 	[%rd36+8], %rd56;
-$L__BB9_3:                              // %bb8
+$L__BB10_3:                             // %bb8
 	ret;
                                         // -- End function
 }

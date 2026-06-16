@@ -173,6 +173,60 @@ impl CudaBackend {
             .expect("CudaBackend::download_real device copy failed")
     }
 
+    /// Real-scalar scaling `buf *= s`, in place over a resident interleaved
+    /// complex device buffer (one velocity/spectral component).
+    ///
+    /// Loads the offline-compiled `scale_cplx` kernel from the checked-in PTX
+    /// and launches it on the default stream, then synchronises. `buf` is an
+    /// interleaved complex buffer of `n` spectral points (length `2 n`); `s` is
+    /// a real scalar applied to both interleaved slots of every element.
+    ///
+    /// Mirrors [`crate::ops::scale::scale_cplx_inplace`]; the kernel is a single
+    /// multiply per `f64` slot (one rounding, no fusion), so the GPU result
+    /// matches the scalar CPU body to a rounding.
+    pub fn scale_cplx<F: Float>(
+        &self,
+        buf: &mut CplxBuf<F>,
+        s: F,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let len = buf.buf.len();
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("scale_cplx")?;
+
+        // Param order matches the kernel: buf (ptr, len), then the scalar s.
+        let mut p_buf = buf.buf.cu_deviceptr();
+        let mut l_buf = len as u64;
+        let mut v_s = self.as_f64(s);
+
+        let mut params: [*mut std::ffi::c_void; 3] = [
+            &mut p_buf as *mut _ as *mut std::ffi::c_void,
+            &mut l_buf as *mut _ as *mut std::ffi::c_void,
+            &mut v_s as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        // One thread per f64 element (length 2 n).
+        let cfg = LaunchConfig::for_num_elems(len as u32);
+        // SAFETY: `func` comes from a module loaded on `self.ctx`; the stream
+        // belongs to the same context; the 3 params alias the live buf (ptr,
+        // len) and the scalar `s` in the order the PTX expects; the grid is
+        // sized for `2 n` f64 elements and the kernel bounds-checks `i < len`.
+        // Params outlive the call (synchronise below before they drop).
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
     /// Cross product `c = u x omega`, pointwise over resident device buffers.
     ///
     /// Loads the offline-compiled `cross_product` kernel from the checked-in
@@ -2154,6 +2208,56 @@ mod tests {
             assert_eq!(
                 g, c,
                 "spectral_truncate mismatch at flat idx {j}: gpu {g}, cpu {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn scale_cplx_matches_cpu_body() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+
+        // Deterministic pseudo-random interleaved complex field of n points.
+        let n = 4096;
+        let host: Vec<Complex<f64>> = (0..n)
+            .map(|i| {
+                let t = 0.017 * i as f64;
+                Complex::new(t.sin() * 1.6 + 0.25, (t * 1.3).cos() * 1.1 - 0.2)
+            })
+            .collect();
+        let s = 1.0 / (n as f64); // a representative 1/N dealiasing factor.
+
+        // CPU body oracle over the flat interleaved buffer.
+        let mut flat: Vec<f64> = Vec::with_capacity(2 * n);
+        for c in &host {
+            flat.push(c.re);
+            flat.push(c.im);
+        }
+        let mut cpu = flat.clone();
+        crate::ops::scale::scale_cplx_inplace::<f64>(&mut cpu, s);
+
+        // GPU path on a resident buffer, scaled in place.
+        let mut dev = be.alloc_cplx::<f64>(n);
+        be.upload_cplx(&host, &mut dev);
+        be.scale_cplx::<f64>(&mut dev, s)
+            .expect("GPU scale_cplx launch failed");
+
+        let mut hback = vec![Complex::new(0.0_f64, 0.0); n];
+        be.download_cplx(&dev, &mut hback);
+        let mut gpu = Vec::with_capacity(2 * n);
+        for c in &hback {
+            gpu.push(c.re);
+            gpu.push(c.im);
+        }
+
+        // A single multiply per slot, no fusion, so the GPU and the CPU body
+        // round identically: the result is bit-exact.
+        assert_eq!(gpu.len(), cpu.len());
+        for (j, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
+            assert_eq!(
+                g, c,
+                "scale_cplx mismatch at flat idx {j}: gpu {g}, cpu {c}"
             );
         }
     }
