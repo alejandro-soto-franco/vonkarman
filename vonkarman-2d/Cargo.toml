@@ -1,0 +1,12 @@
+[package]
+name = "vonkarman-2d"
+version.workspace = true
+edition = "2024"
+license = "MIT"
+description = "2D pseudo-spectral incompressible Navier-Stokes (vorticity-streamfunction) with passive scalar transport; a sibling of vonkarman."
+
+[dependencies]
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+ndrustfft = "0.5"
+image = { version = "0.25", default-features = false, features = ["png"] }

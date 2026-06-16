@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "vonkarman-core",
+    "vonkarman-2d",
     "vonkarman-compute",
     "vonkarman-fft",
     "vonkarman-periodic",
