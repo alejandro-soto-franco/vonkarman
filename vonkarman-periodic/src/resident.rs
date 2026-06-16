@@ -193,11 +193,16 @@ impl ResidentSolver {
 
         // cuFFT plans on both grids, bound to the backend stream so the FFT and
         // the pointwise kernels share one ordered stream (no cross-stream sync).
-        let fft = CufftBackend::new(grid.nx, grid.ny, grid.nz)
+        // DEVICE-ONLY plans: the resident path uses only the `*_dev` entry points
+        // on its own resident buffers, never the host FFT methods, so we skip the
+        // per-plan host-path d_real/d_complex scratch (~1.1 GiB at N=256) and let
+        // the two plans share ONE work area. This is what brings N=256 inside the
+        // 8 GB card; with the host-path constructor the scratch alone overflows it.
+        let fft = CufftBackend::new_device_only(grid.nx, grid.ny, grid.nz)
             .expect("ResidentSolver: cuFFT N-grid plan creation failed");
         fft.set_stream(backend.stream_raw())
             .expect("ResidentSolver: cuFFT N-grid set_stream failed");
-        let fft_padded = CufftBackend::new(pg.nx, pg.ny, pg.nz)
+        let fft_padded = CufftBackend::new_device_only(pg.nx, pg.ny, pg.nz)
             .expect("ResidentSolver: cuFFT padded plan creation failed");
         fft_padded
             .set_stream(backend.stream_raw())
@@ -351,19 +356,19 @@ impl ResidentSolver {
         let real_coeffs = 11 * self.cplx_len; // kx, ky, kz, k2 + 7 ETD coeffs
         let buffers = (n_complex + padded_complex + padded_real + real_coeffs) * f64_bytes;
 
-        // cuFFT internal work areas plus each plan's own host-path scratch
-        // (d_real = preal/real f64s, d_complex = 2 * pcplx/cplx f64s).
-        let (pd2z, pz2d) = self.fft_padded.workarea_bytes().unwrap_or((0, 0));
-        let (nd2z, nz2d) = self.fft.workarea_bytes().unwrap_or((0, 0));
-        let padded_plan_scratch = (self.preal_len + 2 * self.pcplx_len) * f64_bytes;
-        let n_plan_scratch = (self.real_len + 2 * self.cplx_len) * f64_bytes;
+        // cuFFT work areas ONLY (device-only plans: no host-path d_real/d_complex
+        // scratch, and the two plans of each backend SHARE one work area, so the
+        // real cost is the max of the two plan sizes per backend, not the sum).
+        let padded_work = self.fft_padded.allocated_workarea_bytes().unwrap_or(0);
+        let n_work = self.fft.allocated_workarea_bytes().unwrap_or(0);
 
-        buffers + pd2z + pz2d + nd2z + nz2d + padded_plan_scratch + n_plan_scratch
+        buffers + padded_work + n_work
     }
 
-    /// cuFFT padded-plan work-area sizes `(d2z_bytes, z2d_bytes)` for the budget.
-    pub fn padded_workarea_bytes(&self) -> (usize, usize) {
-        self.fft_padded.workarea_bytes().unwrap_or((0, 0))
+    /// ACTUAL cuFFT work-area bytes allocated for the padded (384^3) plans (the
+    /// single shared buffer of a device-only backend), for the budget report.
+    pub fn padded_workarea_bytes(&self) -> usize {
+        self.fft_padded.allocated_workarea_bytes().unwrap_or(0)
     }
 
     /// Queries `(free, total)` device memory in bytes via `cudaMemGetInfo`, so

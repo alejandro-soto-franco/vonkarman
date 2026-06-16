@@ -68,6 +68,10 @@ struct CudaLibs {
     cuda_free: unsafe extern "C" fn(*mut c_void) -> i32,
     cuda_memcpy: unsafe extern "C" fn(*mut c_void, *const c_void, usize, i32) -> i32,
     cufft_plan_3d: unsafe extern "C" fn(*mut CufftHandle, i32, i32, i32, i32) -> i32,
+    cufft_create: unsafe extern "C" fn(*mut CufftHandle) -> i32,
+    cufft_set_auto_allocation: unsafe extern "C" fn(CufftHandle, i32) -> i32,
+    cufft_make_plan_3d: unsafe extern "C" fn(CufftHandle, i32, i32, i32, i32, *mut usize) -> i32,
+    cufft_set_work_area: unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32,
     cufft_exec_d2z: unsafe extern "C" fn(CufftHandle, *mut f64, *mut [f64; 2]) -> i32,
     cufft_exec_z2d: unsafe extern "C" fn(CufftHandle, *mut [f64; 2], *mut f64) -> i32,
     cufft_set_stream: unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32,
@@ -145,6 +149,32 @@ impl CudaLibs {
                     sym: "cufftGetSize".into(),
                     source: e,
                 })?;
+            let cufft_create = *cufft_lib
+                .get::<unsafe extern "C" fn(*mut CufftHandle) -> i32>(b"cufftCreate\0")
+                .map_err(|e| CufftError::SymbolLoad {
+                    sym: "cufftCreate".into(),
+                    source: e,
+                })?;
+            let cufft_set_auto_allocation = *cufft_lib
+                .get::<unsafe extern "C" fn(CufftHandle, i32) -> i32>(b"cufftSetAutoAllocation\0")
+                .map_err(|e| CufftError::SymbolLoad {
+                    sym: "cufftSetAutoAllocation".into(),
+                    source: e,
+                })?;
+            let cufft_make_plan_3d = *cufft_lib
+                .get::<unsafe extern "C" fn(CufftHandle, i32, i32, i32, i32, *mut usize) -> i32>(
+                    b"cufftMakePlan3d\0",
+                )
+                .map_err(|e| CufftError::SymbolLoad {
+                    sym: "cufftMakePlan3d".into(),
+                    source: e,
+                })?;
+            let cufft_set_work_area = *cufft_lib
+                .get::<unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32>(b"cufftSetWorkArea\0")
+                .map_err(|e| CufftError::SymbolLoad {
+                    sym: "cufftSetWorkArea".into(),
+                    source: e,
+                })?;
             let cufft_destroy = *cufft_lib
                 .get::<unsafe extern "C" fn(CufftHandle) -> i32>(b"cufftDestroy\0")
                 .map_err(|e| CufftError::SymbolLoad {
@@ -159,6 +189,10 @@ impl CudaLibs {
                 cuda_free,
                 cuda_memcpy,
                 cufft_plan_3d,
+                cufft_create,
+                cufft_set_auto_allocation,
+                cufft_make_plan_3d,
+                cufft_set_work_area,
                 cufft_exec_d2z,
                 cufft_exec_z2d,
                 cufft_set_stream,
@@ -187,6 +221,15 @@ pub struct CufftBackend {
     plan_d2z: CufftHandle,
     /// cuFFT plan for inverse Z2D transform.
     plan_z2d: CufftHandle,
+    /// Shared cuFFT work area for the device-only constructor (one buffer used by
+    /// BOTH plans, valid because the resident solver runs them sequentially on a
+    /// single stream). Null for the host-path constructor (cuFFT auto-allocates a
+    /// separate work area per plan there). Freed on Drop when non-null.
+    shared_work_area: *mut c_void,
+    /// The shared work area's size in bytes, recorded from `cufftMakePlan3d`
+    /// (`max` of the two plans' required sizes), for the memory budget. Zero for
+    /// the host-path constructor.
+    shared_work_bytes: usize,
 }
 
 // CufftBackend is Send because the device pointers and plans are only
@@ -249,6 +292,129 @@ impl CufftBackend {
             d_complex,
             plan_d2z,
             plan_z2d,
+            shared_work_area: ptr::null_mut(),
+            shared_work_bytes: 0,
+        })
+    }
+
+    /// Creates a DEVICE-ONLY cuFFT backend: the two plans share ONE work area and
+    /// the host-path `d_real`/`d_complex` scratch is NOT allocated.
+    ///
+    /// The host [`FftBackend`] methods (`r2c_3d`/`c2r_3d`) require the per-plan
+    /// `d_real`/`d_complex` scratch and PANIC on a device-only backend; only the
+    /// resident `*_dev` entry points are valid here. This exists to shrink the
+    /// resident solver's footprint: at the 3/2-padded 384^3 grid the host-path
+    /// scratch alone is ~0.85 GiB and cuFFT's two auto-allocated work areas are
+    /// another large chunk; dropping the scratch and sharing ONE work area between
+    /// the two plans (safe because the resident solver runs them sequentially on a
+    /// single stream) reclaims over 1 GiB, the difference between fitting 256^3 in
+    /// 8 GB and overflowing it.
+    ///
+    /// Mechanics: `cufftCreate` both plans, `cufftSetAutoAllocation(plan, 0)`,
+    /// `cufftMakePlan3d` (which returns each plan's work size), allocate ONE
+    /// device buffer of the MAX of the two sizes, then `cufftSetWorkArea` both
+    /// plans to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CufftError`] if any cuFFT call or the work-area allocation
+    /// fails.
+    pub fn new_device_only(nx: usize, ny: usize, nz: usize) -> Result<Self, CufftError> {
+        let libs = CudaLibs::load()?;
+
+        let mut plan_d2z: CufftHandle = 0;
+        let mut plan_z2d: CufftHandle = 0;
+        let mut sz_d2z: usize = 0;
+        let mut sz_z2d: usize = 0;
+        let mut work: *mut c_void = ptr::null_mut();
+
+        unsafe {
+            // Create both plans with auto-allocation OFF so cuFFT does not
+            // allocate a separate work area per plan.
+            let rc = (libs.cufft_create)(&mut plan_d2z);
+            if rc != 0 {
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_create)(&mut plan_z2d);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_set_auto_allocation)(plan_d2z, 0);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_set_auto_allocation)(plan_z2d, 0);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            // Build the plans; each returns its required work-area size.
+            let rc = (libs.cufft_make_plan_3d)(
+                plan_d2z,
+                nx as i32,
+                ny as i32,
+                nz as i32,
+                CUFFT_D2Z,
+                &mut sz_d2z,
+            );
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_make_plan_3d)(
+                plan_z2d,
+                nx as i32,
+                ny as i32,
+                nz as i32,
+                CUFFT_Z2D,
+                &mut sz_z2d,
+            );
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            // ONE work area of the max size, shared by both plans (they run
+            // sequentially on the resident solver's single stream).
+            let work_bytes = sz_d2z.max(sz_z2d);
+            let rc = (libs.cuda_malloc)(&mut work, work_bytes);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::Alloc { code: rc });
+            }
+            let rc = (libs.cufft_set_work_area)(plan_d2z, work);
+            if rc != 0 {
+                (libs.cuda_free)(work);
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_set_work_area)(plan_z2d, work);
+            if rc != 0 {
+                (libs.cuda_free)(work);
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+        }
+
+        Ok(Self {
+            libs,
+            nx,
+            ny,
+            nz,
+            d_real: ptr::null_mut(),
+            d_complex: ptr::null_mut(),
+            plan_d2z,
+            plan_z2d,
+            shared_work_area: work,
+            shared_work_bytes: sz_d2z.max(sz_z2d),
         })
     }
 
@@ -319,6 +485,34 @@ impl CufftBackend {
         Ok((d2z, z2d))
     }
 
+    /// Whether this backend was built device-only (one shared work area, no
+    /// host-path scratch), as opposed to the host-path [`Self::new`].
+    pub fn is_device_only(&self) -> bool {
+        !self.shared_work_area.is_null()
+    }
+
+    /// ACTUAL cuFFT work-area bytes this backend has allocated on the device.
+    ///
+    /// For a device-only backend ([`Self::new_device_only`]) this is the SINGLE
+    /// shared buffer (`max` of the two plans' required sizes), the real cost. For
+    /// the host-path backend, cuFFT auto-allocated one work area per plan, so the
+    /// real cost is the SUM of the two `cufftGetSize` queries. Returns the actual
+    /// allocated work-area bytes either way, for the resident memory budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CufftError::Exec`] if `cufftGetSize` fails on either plan.
+    pub fn allocated_workarea_bytes(&self) -> Result<usize, CufftError> {
+        if self.is_device_only() {
+            // The real size we allocated, recorded from cufftMakePlan3d (a
+            // post-hoc cufftGetSize can read 0 once the work area is set).
+            Ok(self.shared_work_bytes)
+        } else {
+            let (d2z, z2d) = self.workarea_bytes()?;
+            Ok(d2z + z2d)
+        }
+    }
+
     /// Forward real-to-complex FFT executed DIRECTLY on caller-owned device
     /// buffers, with no host transfer.
     ///
@@ -379,8 +573,18 @@ impl Drop for CufftBackend {
         unsafe {
             (self.libs.cufft_destroy)(self.plan_d2z);
             (self.libs.cufft_destroy)(self.plan_z2d);
-            (self.libs.cuda_free)(self.d_real);
-            (self.libs.cuda_free)(self.d_complex);
+            // Host-path scratch (null on a device-only backend; cudaFree(null) is
+            // a documented no-op, but guard anyway for clarity).
+            if !self.d_real.is_null() {
+                (self.libs.cuda_free)(self.d_real);
+            }
+            if !self.d_complex.is_null() {
+                (self.libs.cuda_free)(self.d_complex);
+            }
+            // The single shared work area of a device-only backend.
+            if !self.shared_work_area.is_null() {
+                (self.libs.cuda_free)(self.shared_work_area);
+            }
         }
     }
 }

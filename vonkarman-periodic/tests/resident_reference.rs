@@ -392,14 +392,20 @@ fn taylor_green_re1600_resident_128() {
     );
 
     // Peak dissipation rate gate, IDENTICAL to the CPU reference_data test:
-    // epsilon in [0.005, 0.015]. NOTE: at N=128 the under-resolved TG Re1600 run
-    // over-predicts enstrophy and this gate is overshot (measured ~0.0207); the
-    // CPU `reference_data` test overshoots it the same way at this resolution.
-    // The gate is kept UNCHANGED (not relaxed): the resident path reproduces the
-    // CPU physics; the absolute epsilon band needs a finer grid to be met.
+    // epsilon in [0.005, 0.015]. NOTE (measured 2026): at N=128 the under-
+    // resolved TG Re1600 run over-predicts enstrophy and BOTH paths overshoot
+    // this gate. The resident GPU peak epsilon is ~2.07e-2 (enstrophy 1.654e1 at
+    // t=8.68); the CPU `reference_data` test, run to completion on the same box,
+    // peaks at epsilon 2.081e-2 (enstrophy 1.665e1 at t=8.82) and FAILS the same
+    // assertion. The two agree to <1% (the small gap is the resident every-25-
+    // step sampling vs the CPU every-step peak capture). The gate is kept
+    // UNCHANGED (not relaxed): the resident path faithfully reproduces the CPU
+    // physics; the literature [0.005, 0.015] band is for a well-resolved grid and
+    // is not met at N=128 by EITHER solver.
     assert!(
         peak_epsilon > 0.005 && peak_epsilon < 0.015,
-        "peak epsilon={peak_epsilon:.6e}, expected in [0.005, 0.015]"
+        "peak epsilon={peak_epsilon:.6e}, expected in [0.005, 0.015] \
+         (N=128 under-resolved; CPU reference_data overshoots identically at ~2.08e-2)"
     );
 
     // Energy should have decayed significantly (E0 = 1/8 analytical).
@@ -462,12 +468,11 @@ fn taylor_green_resident_256_fits_8gb() {
 
     // Analytic estimate (incl. cuFFT work areas, queried live).
     let est = solver.peak_memory_bytes();
-    let (pd2z, pz2d) = solver.padded_workarea_bytes();
+    let pwork = solver.padded_workarea_bytes();
     eprintln!(
-        "analytic peak estimate at N={n}: {:.3} GiB (padded cuFFT work areas: D2Z {:.3} GiB, Z2D {:.3} GiB)",
+        "analytic peak estimate at N={n}: {:.3} GiB (shared padded cuFFT work area: {:.4} GiB)",
         est as f64 / gib,
-        pd2z as f64 / gib,
-        pz2d as f64 / gib
+        pwork as f64 / gib
     );
 
     // Free right after construction (all resident buffers + cuFFT plans live).
