@@ -52,6 +52,9 @@ pub enum CufftError {
 
     #[error("cufftExec failed (code {code})")]
     Exec { code: i32 },
+
+    #[error("cufftSetStream failed (code {code})")]
+    SetStream { code: i32 },
 }
 
 /// Loaded CUDA runtime and cuFFT function pointers.
@@ -67,6 +70,7 @@ struct CudaLibs {
     cufft_plan_3d: unsafe extern "C" fn(*mut CufftHandle, i32, i32, i32, i32) -> i32,
     cufft_exec_d2z: unsafe extern "C" fn(CufftHandle, *mut f64, *mut [f64; 2]) -> i32,
     cufft_exec_z2d: unsafe extern "C" fn(CufftHandle, *mut [f64; 2], *mut f64) -> i32,
+    cufft_set_stream: unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32,
     cufft_destroy: unsafe extern "C" fn(CufftHandle) -> i32,
 }
 
@@ -128,6 +132,12 @@ impl CudaLibs {
                     sym: "cufftExecZ2D".into(),
                     source: e,
                 })?;
+            let cufft_set_stream = *cufft_lib
+                .get::<unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32>(b"cufftSetStream\0")
+                .map_err(|e| CufftError::SymbolLoad {
+                    sym: "cufftSetStream".into(),
+                    source: e,
+                })?;
             let cufft_destroy = *cufft_lib
                 .get::<unsafe extern "C" fn(CufftHandle) -> i32>(b"cufftDestroy\0")
                 .map_err(|e| CufftError::SymbolLoad {
@@ -144,6 +154,7 @@ impl CudaLibs {
                 cufft_plan_3d,
                 cufft_exec_d2z,
                 cufft_exec_z2d,
+                cufft_set_stream,
                 cufft_destroy,
             })
         }
@@ -231,6 +242,98 @@ impl CufftBackend {
             plan_d2z,
             plan_z2d,
         })
+    }
+
+    /// Binds both cuFFT plans (forward D2Z and inverse Z2D) to `stream`.
+    ///
+    /// After this call every `r2c_3d_dev`/`c2r_3d_dev` execution is enqueued on
+    /// `stream` rather than the implicit default stream, so cuFFT runs on the
+    /// same stream as the resident compute backend's kernels (no cross-stream
+    /// synchronisation needed between an FFT and the pointwise operators).
+    ///
+    /// The stream pointer must belong to the SAME CUDA primary context that
+    /// owns the device buffers passed to the `*_dev` methods (in practice the
+    /// `cuda-core` backend stream obtained from `CudaBackend::stream_raw`). A
+    /// null pointer selects the default stream, which is valid and harmless.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CufftError::SetStream`] if cuFFT rejects the stream on either
+    /// plan (for example a stream from a different context).
+    // cuFFT only stores the handle here; it does not dereference the stream
+    // until a later exec, and the stream-validity contract is documented above.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn set_stream(&self, stream: *mut c_void) -> Result<(), CufftError> {
+        unsafe {
+            let rc = (self.libs.cufft_set_stream)(self.plan_d2z, stream);
+            if rc != 0 {
+                return Err(CufftError::SetStream { code: rc });
+            }
+            let rc = (self.libs.cufft_set_stream)(self.plan_z2d, stream);
+            if rc != 0 {
+                return Err(CufftError::SetStream { code: rc });
+            }
+        }
+        Ok(())
+    }
+
+    /// Grid dimensions this backend was planned for: `(nx, ny, nz)`.
+    pub fn dims(&self) -> (usize, usize, usize) {
+        (self.nx, self.ny, self.nz)
+    }
+
+    /// Forward real-to-complex FFT executed DIRECTLY on caller-owned device
+    /// buffers, with no host transfer.
+    ///
+    /// Runs `cufftExecD2Z(plan_d2z, d_real, d_complex)` against the resident
+    /// pointers; `self.d_real`/`self.d_complex` (the host-path scratch) are not
+    /// touched. The result lands in `d_complex` in cuFFT's native interleaved
+    /// `[re, im, ...]` layout, length `nx * ny * (nz/2 + 1)` complex elements.
+    ///
+    /// # Safety
+    ///
+    /// - `d_real` must point to a valid device allocation of at least
+    ///   `nx * ny * nz` `f64`s, and `d_complex` to at least
+    ///   `nx * ny * (nz/2 + 1)` interleaved complex `f64` pairs
+    ///   (`2 * nx * ny * (nz/2 + 1)` `f64`s).
+    /// - Both allocations must live in the active CUDA primary context (the one
+    ///   the plan was created in and `set_stream`'s stream belongs to).
+    /// - The buffers must not be freed or moved before the transform completes
+    ///   (synchronise the stream before reuse).
+    pub unsafe fn r2c_3d_dev(&self, d_real: *mut f64, d_complex: *mut f64) {
+        unsafe {
+            let rc = (self.libs.cufft_exec_d2z)(self.plan_d2z, d_real, d_complex as *mut [f64; 2]);
+            assert_eq!(rc, 0, "cufftExecD2Z (device) failed: {rc}");
+        }
+    }
+
+    /// Inverse complex-to-real FFT executed DIRECTLY on caller-owned device
+    /// buffers, with no host transfer and NO normalisation.
+    ///
+    /// Runs `cufftExecZ2D(plan_z2d, d_complex, d_real)` against the resident
+    /// pointers; `self.d_real`/`self.d_complex` are not touched. The result
+    /// lands in `d_real`, length `nx * ny * nz` reals.
+    ///
+    /// CRITICAL: unlike the host [`FftBackend::c2r_3d`] path, this leaves the
+    /// output UNNORMALISED. cuFFT's inverse transform is unscaled, so the caller
+    /// MUST divide the result by `N = nx * ny * nz` itself. Responsibility for
+    /// the `1/N` is handed back deliberately so the resident step can fuse it
+    /// with other per-mode scaling (a later task supplies a device scale kernel;
+    /// until then the round-trip test normalises after the single download).
+    ///
+    /// # Safety
+    ///
+    /// - `d_complex` must point to a valid device allocation of at least
+    ///   `nx * ny * (nz/2 + 1)` interleaved complex `f64` pairs, and `d_real` to
+    ///   at least `nx * ny * nz` `f64`s.
+    /// - Both allocations must live in the active CUDA primary context.
+    /// - The buffers must not be freed or moved before the transform completes
+    ///   (synchronise the stream before reuse).
+    pub unsafe fn c2r_3d_dev(&self, d_complex: *mut f64, d_real: *mut f64) {
+        unsafe {
+            let rc = (self.libs.cufft_exec_z2d)(self.plan_z2d, d_complex as *mut [f64; 2], d_real);
+            assert_eq!(rc, 0, "cufftExecZ2D (device) failed: {rc}");
+        }
     }
 }
 
