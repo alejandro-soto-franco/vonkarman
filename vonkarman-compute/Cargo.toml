@@ -18,6 +18,9 @@ rayon = { workspace = true }
 # codegen happens at library build time.
 cuda-core = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline", optional = true }
 
+[dev-dependencies]
+ndarray = { workspace = true }
+
 [features]
 default = []
 cuda = ["dep:cuda-core"]

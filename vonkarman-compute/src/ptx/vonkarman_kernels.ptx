@@ -6,8 +6,114 @@
 .target sm_80
 .address_size 64
 
+	// .globl	curl                    // -- Begin function curl
+                                        // @curl
+.visible .entry curl(
+	.param .u64 .ptr .align 1 curl_param_0,
+	.param .u64 curl_param_1,
+	.param .u64 .ptr .align 1 curl_param_2,
+	.param .u64 curl_param_3,
+	.param .u64 .ptr .align 1 curl_param_4,
+	.param .u64 curl_param_5,
+	.param .u64 .ptr .align 1 curl_param_6,
+	.param .u64 curl_param_7,
+	.param .u64 .ptr .align 1 curl_param_8,
+	.param .u64 curl_param_9,
+	.param .u64 .ptr .align 1 curl_param_10,
+	.param .u64 curl_param_11,
+	.param .u64 .ptr .align 1 curl_param_12,
+	.param .u64 curl_param_13,
+	.param .u64 .ptr .align 1 curl_param_14,
+	.param .u64 curl_param_15,
+	.param .u64 .ptr .align 1 curl_param_16,
+	.param .u64 curl_param_17
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<64>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd11, [curl_param_0];
+	ld.param.b64 	%rd12, [curl_param_6];
+	cvta.to.global.u64 	%rd1, %rd12;
+	ld.param.b64 	%rd13, [curl_param_8];
+	cvta.to.global.u64 	%rd2, %rd13;
+	ld.param.b64 	%rd14, [curl_param_2];
+	ld.param.b64 	%rd15, [curl_param_10];
+	cvta.to.global.u64 	%rd3, %rd15;
+	cvta.to.global.u64 	%rd4, %rd11;
+	ld.param.b64 	%rd16, [curl_param_4];
+	cvta.to.global.u64 	%rd5, %rd14;
+	cvta.to.global.u64 	%rd6, %rd16;
+	ld.param.b64 	%rd17, [curl_param_12];
+	cvta.to.global.u64 	%rd7, %rd17;
+	ld.param.b64 	%rd18, [curl_param_7];
+	ld.param.b64 	%rd19, [curl_param_14];
+	cvta.to.global.u64 	%rd8, %rd19;
+	ld.param.b64 	%rd20, [curl_param_16];
+	cvta.to.global.u64 	%rd9, %rd20;
+	mov.u32 	%r1, %tid.x;
+	cvt.u64.u32 	%rd21, %r1;
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mul.wide.u32 	%rd22, %r2, %r3;
+	add.s64 	%rd10, %rd22, %rd21;
+	setp.ge.u64 	%p1, %rd10, %rd18;
+	@%p1 bra 	$L__BB0_2;
+// %bb.1:                               // %bb2
+	shl.b64 	%rd23, %rd10, 3;
+	add.s64 	%rd24, %rd1, %rd23;
+	ld.global.b64 	%rd25, [%rd24];
+	add.s64 	%rd26, %rd2, %rd23;
+	ld.global.b64 	%rd27, [%rd26];
+	add.s64 	%rd28, %rd3, %rd23;
+	ld.global.b64 	%rd29, [%rd28];
+	shl.b64 	%rd30, %rd10, 4;
+	add.s64 	%rd31, %rd4, %rd30;
+	ld.global.b64 	%rd32, [%rd31];
+	ld.global.b64 	%rd33, [%rd31+8];
+	add.s64 	%rd34, %rd5, %rd30;
+	ld.global.b64 	%rd35, [%rd34];
+	ld.global.b64 	%rd36, [%rd34+8];
+	add.s64 	%rd37, %rd6, %rd30;
+	ld.global.b64 	%rd38, [%rd37];
+	ld.global.b64 	%rd39, [%rd37+8];
+	mul.f64 	%rd40, %rd29, %rd36;
+	neg.f64 	%rd41, %rd40;
+	fma.rn.f64 	%rd42, %rd27, %rd39, %rd41;
+	add.s64 	%rd43, %rd7, %rd30;
+	neg.f64 	%rd44, %rd42;
+	st.global.b64 	[%rd43], %rd44;
+	mul.f64 	%rd45, %rd29, %rd35;
+	neg.f64 	%rd46, %rd45;
+	fma.rn.f64 	%rd47, %rd27, %rd38, %rd46;
+	st.global.b64 	[%rd43+8], %rd47;
+	mul.f64 	%rd48, %rd25, %rd39;
+	neg.f64 	%rd49, %rd48;
+	fma.rn.f64 	%rd50, %rd29, %rd33, %rd49;
+	add.s64 	%rd51, %rd8, %rd30;
+	neg.f64 	%rd52, %rd50;
+	st.global.b64 	[%rd51], %rd52;
+	mul.f64 	%rd53, %rd25, %rd38;
+	neg.f64 	%rd54, %rd53;
+	fma.rn.f64 	%rd55, %rd29, %rd32, %rd54;
+	st.global.b64 	[%rd51+8], %rd55;
+	mul.f64 	%rd56, %rd27, %rd33;
+	neg.f64 	%rd57, %rd56;
+	fma.rn.f64 	%rd58, %rd25, %rd36, %rd57;
+	add.s64 	%rd59, %rd9, %rd30;
+	neg.f64 	%rd60, %rd58;
+	st.global.b64 	[%rd59], %rd60;
+	mul.f64 	%rd61, %rd27, %rd32;
+	neg.f64 	%rd62, %rd61;
+	fma.rn.f64 	%rd63, %rd25, %rd35, %rd62;
+	st.global.b64 	[%rd59+8], %rd63;
+$L__BB0_2:                              // %bb11
+	ret;
+                                        // -- End function
+}
 	// .globl	cross_product           // -- Begin function cross_product
-                                        // @cross_product
 .visible .entry cross_product(
 	.param .u64 .ptr .align 1 cross_product_param_0,
 	.param .u64 cross_product_param_1,
@@ -27,7 +133,7 @@
 	.param .u64 cross_product_param_15,
 	.param .u64 .ptr .align 1 cross_product_param_16,
 	.param .u64 cross_product_param_17
-)
+)                                       // @cross_product
 {
 	.reg .pred 	%p<2>;
 	.reg .b32 	%r<4>;
@@ -60,7 +166,7 @@
 	mul.wide.u32 	%rd22, %r2, %r3;
 	add.s64 	%rd10, %rd22, %rd20;
 	setp.ge.u64 	%p1, %rd10, %rd21;
-	@%p1 bra 	$L__BB0_2;
+	@%p1 bra 	$L__BB1_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd23, %rd10, 3;
 	add.s64 	%rd24, %rd1, %rd23;
@@ -90,7 +196,7 @@
 	neg.f64 	%rd46, %rd44;
 	fma.rn.f64 	%rd47, %rd31, %rd39, %rd46;
 	st.global.b64 	[%rd45], %rd47;
-$L__BB0_2:                              // %bb10
+$L__BB1_2:                              // %bb10
 	ret;
                                         // -- End function
 }

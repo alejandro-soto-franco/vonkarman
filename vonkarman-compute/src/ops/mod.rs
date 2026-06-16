@@ -5,5 +5,7 @@
 //! to become a GPU kernel, where the CPU result is the differential oracle.
 
 pub mod cross;
+pub mod curl;
 
 pub use cross::cross_product_inplace;
+pub use curl::curl_inplace;

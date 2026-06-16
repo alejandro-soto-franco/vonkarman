@@ -197,6 +197,101 @@ impl CudaBackend {
         }
         stream.synchronize()
     }
+
+    /// Spectral curl `omega_hat = i k x u_hat` over resident device buffers.
+    ///
+    /// Loads the offline-compiled `curl` kernel from the checked-in PTX and
+    /// launches it on the default stream, then synchronises. The velocity
+    /// inputs and vorticity outputs are interleaved complex buffers of `n`
+    /// spectral points (length `2 n`); the wavenumbers `kx`/`ky`/`kz` are real
+    /// buffers of length `n`, one value per spectral grid point in the same
+    /// flat order.
+    ///
+    /// Mirrors [`crate::ops::curl::curl_inplace`]; the GPU fuses each
+    /// `a * b - c * d` into one `fma.rn.f64`, so results differ from the
+    /// twice-rounded scalar CPU path by about one ULP per real output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn curl<F: Float>(
+        &self,
+        ux: &CplxBuf<F>,
+        uy: &CplxBuf<F>,
+        uz: &CplxBuf<F>,
+        kx: &RealBuf<F>,
+        ky: &RealBuf<F>,
+        kz: &RealBuf<F>,
+        ox: &mut CplxBuf<F>,
+        oy: &mut CplxBuf<F>,
+        oz: &mut CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let n = kx.buf.len();
+        debug_assert!(
+            ky.buf.len() == n
+                && kz.buf.len() == n
+                && ux.buf.len() == 2 * n
+                && uy.buf.len() == 2 * n
+                && uz.buf.len() == 2 * n
+                && ox.buf.len() == 2 * n
+                && oy.buf.len() == 2 * n
+                && oz.buf.len() == 2 * n,
+            "curl: complex buffers must be length 2n, wavenumber buffers length n"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("curl")?;
+
+        // Param order matches the kernel signature: ux, uy, uz, kx, ky, kz,
+        // ox, oy, oz. Each &[f64] / DisjointSlice<f64> lowers to a (ptr, len)
+        // pair. The complex buffers report length 2n; the wavenumber buffers n.
+        let mut ptrs = [
+            ux.buf.cu_deviceptr(),
+            uy.buf.cu_deviceptr(),
+            uz.buf.cu_deviceptr(),
+            kx.buf.cu_deviceptr(),
+            ky.buf.cu_deviceptr(),
+            kz.buf.cu_deviceptr(),
+            ox.buf.cu_deviceptr(),
+            oy.buf.cu_deviceptr(),
+            oz.buf.cu_deviceptr(),
+        ];
+        let mut lens: [u64; 9] = [
+            (2 * n) as u64,
+            (2 * n) as u64,
+            (2 * n) as u64,
+            n as u64,
+            n as u64,
+            n as u64,
+            (2 * n) as u64,
+            (2 * n) as u64,
+            (2 * n) as u64,
+        ];
+
+        let mut params: [*mut std::ffi::c_void; 18] = [std::ptr::null_mut(); 18];
+        for k in 0..9 {
+            params[2 * k] = &mut ptrs[k] as *mut _ as *mut std::ffi::c_void;
+            params[2 * k + 1] = &mut lens[k] as *mut _ as *mut std::ffi::c_void;
+        }
+
+        // One thread per spectral grid point (n), not per f64 element.
+        let cfg = LaunchConfig::for_num_elems(n as u32);
+        // SAFETY: `func` came from a module loaded on `self.ctx`; the stream
+        // belongs to the same context; the 18 params alias live device
+        // pointers / lengths in the (ptr, len) order the PTX expects; the grid
+        // is sized for `n` grid points and the kernel bounds-checks `i < n`.
+        // Params outlive the call (synchronise below before they drop).
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
 }
 
 impl ComputeBackend for CudaBackend {
@@ -440,6 +535,166 @@ mod tests {
                 assert!(
                     abs <= abs_tol,
                     "twice-rounded mismatch at {i}: gpu {g}, cpu {c}, abs {abs:e} > {abs_tol:e}"
+                );
+            }
+        }
+    }
+
+    /// FMA-matched CPU oracle for the spectral curl.
+    ///
+    /// The kernel writes each real output as `a * b - c * d` and the fork fuses
+    /// it into one `fma.rn.f64` (the second product is rounded once, then
+    /// `a * b - (c * d)` is one rounding). The oracle reproduces that with
+    /// `f64::mul_add` so the comparison isolates real divergence from a benign
+    /// ~1 ULP fused-vs-unfused gap.
+    #[allow(clippy::too_many_arguments)]
+    fn curl_oracle_fma(
+        ux: &[f64],
+        uy: &[f64],
+        uz: &[f64],
+        kx: &[f64],
+        ky: &[f64],
+        kz: &[f64],
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n = kx.len();
+        let mut ox = vec![0.0; 2 * n];
+        let mut oy = vec![0.0; 2 * n];
+        let mut oz = vec![0.0; 2 * n];
+        for i in 0..n {
+            let (re, im) = (2 * i, 2 * i + 1);
+            let (kxi, kyi, kzi) = (kx[i], ky[i], kz[i]);
+            let (uxr, uxi) = (ux[re], ux[im]);
+            let (uyr, uyi) = (uy[re], uy[im]);
+            let (uzr, uzi) = (uz[re], uz[im]);
+            // -(ky uz - kz uy) = (kz uy) - (ky uz); fuse as kz.mul_add(uy, -(ky*uz))
+            ox[re] = kzi.mul_add(uyi, -(kyi * uzi));
+            ox[im] = kyi.mul_add(uzr, -(kzi * uyr));
+            oy[re] = kxi.mul_add(uzi, -(kzi * uxi));
+            oy[im] = kzi.mul_add(uxr, -(kxi * uzr));
+            oz[re] = kyi.mul_add(uxi, -(kxi * uyi));
+            oz[im] = kxi.mul_add(uyr, -(kyi * uxr));
+        }
+        (ox, oy, oz)
+    }
+
+    #[test]
+    fn curl_matches_cpu_oracle() {
+        use vonkarman_core::field::GridSpec;
+        use vonkarman_core::spectral_ops::SpectralOps;
+
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+
+        // Real wavenumbers from the same source SpectralOps::curl uses, so the
+        // GPU and CPU share identical k values.
+        let grid = GridSpec::cubic(16, 2.0 * std::f64::consts::PI);
+        let ops = SpectralOps::<f64>::new(&grid);
+        let (snx, sny, snz) = grid.spectral_shape();
+        let n = snx * sny * snz;
+        let (mut fkx, mut fky, mut fkz) =
+            (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        for ix in 0..snx {
+            for iy in 0..sny {
+                for iz in 0..snz {
+                    fkx.push(ops.kx[ix]);
+                    fky.push(ops.ky[iy]);
+                    fkz.push(ops.kz[iz]);
+                }
+            }
+        }
+
+        // Deterministic pseudo-random interleaved complex fields.
+        let make = |seed: f64| -> Vec<f64> {
+            (0..2 * n)
+                .map(|j| (seed + 0.017 * j as f64).sin() * 1.6 + 0.25)
+                .collect()
+        };
+        let ux = make(0.1);
+        let uy = make(1.3);
+        let uz = make(2.7);
+
+        // GPU path on resident buffers. Upload k as real buffers; the velocity
+        // and vorticity buffers are complex (interleaved, length 2n).
+        let dkx = be.upload_real::<f64>(&fkx);
+        let dky = be.upload_real::<f64>(&fky);
+        let dkz = be.upload_real::<f64>(&fkz);
+        let dux = be.upload_real::<f64>(&ux);
+        let duy = be.upload_real::<f64>(&uy);
+        let duz = be.upload_real::<f64>(&uz);
+        // Reinterpret the real (2n) buffers as complex buffers of n points; the
+        // device storage and flat layout are identical.
+        let cux = CplxBuf::<f64> { buf: dux.buf, len: n, _marker: std::marker::PhantomData };
+        let cuy = CplxBuf::<f64> { buf: duy.buf, len: n, _marker: std::marker::PhantomData };
+        let cuz = CplxBuf::<f64> { buf: duz.buf, len: n, _marker: std::marker::PhantomData };
+        let mut cox = be.alloc_cplx::<f64>(n);
+        let mut coy = be.alloc_cplx::<f64>(n);
+        let mut coz = be.alloc_cplx::<f64>(n);
+        be.curl::<f64>(
+            &cux, &cuy, &cuz, &dkx, &dky, &dkz, &mut cox, &mut coy, &mut coz,
+        )
+        .expect("GPU curl launch failed");
+
+        let mut hox = vec![Complex::new(0.0_f64, 0.0); n];
+        let mut hoy = vec![Complex::new(0.0_f64, 0.0); n];
+        let mut hoz = vec![Complex::new(0.0_f64, 0.0); n];
+        be.download_cplx(&cox, &mut hox);
+        be.download_cplx(&coy, &mut hoy);
+        be.download_cplx(&coz, &mut hoz);
+        let to_flat = |h: &[Complex<f64>]| -> Vec<f64> {
+            let mut v = Vec::with_capacity(2 * h.len());
+            for c in h {
+                v.push(c.re);
+                v.push(c.im);
+            }
+            v
+        };
+        let (gox, goy, goz) = (to_flat(&hox), to_flat(&hoy), to_flat(&hoz));
+
+        // FMA-matched oracle: agreement is essentially bit-exact at well
+        // conditioned points. Each real output is a DIFFERENCE of two products
+        // (`ky uz - kz uy`, and cyclic), so under catastrophic cancellation the
+        // result can be ~1e-2 while the products are O(15); a pure relative
+        // bound then spuriously amplifies a sub-ULP gap. So we accept a point
+        // if it passes EITHER a tight relative bound OR an absolute bound sized
+        // to the product magnitude (k up to ~8, u up to ~1.85 => product ~15),
+        // exactly the cancellation argument the cross test documents.
+        let (oox, ooy, ooz) = curl_oracle_fma(&ux, &uy, &uz, &fkx, &fky, &fkz);
+        let rel_tol = 1e-14;
+        let abs_floor = 16.0 * f64::EPSILON;
+        for (g, o) in [(&gox, &oox), (&goy, &ooy), (&goz, &ooz)] {
+            for j in 0..2 * n {
+                let d = (g[j] - o[j]).abs();
+                let rel = d / o[j].abs().max(f64::MIN_POSITIVE);
+                assert!(
+                    rel <= rel_tol || d <= abs_floor,
+                    "curl oracle mismatch idx {j}: gpu {}, oracle {}, rel {rel:e} > {rel_tol:e}, abs {d:e} > {abs_floor:e}",
+                    g[j],
+                    o[j]
+                );
+            }
+        }
+
+        // Cross-check against the plain twice-rounded CPU body too, so the
+        // kernel maths (not just the fusion) is correct. Here the GPU fuses and
+        // the CPU body does not, so the gap is one fused-vs-unfused product;
+        // its magnitude is bounded ABSOLUTELY by ~eps * |product|. The products
+        // k * u are O(8 * 2) = O(16), so a small multiple of EPSILON scaled by
+        // 16 is the right absolute bound (a relative bound would blow up where
+        // the curl difference cancels to near zero).
+        let (mut cox2, mut coy2, mut coz2) = (vec![0.0; 2 * n], vec![0.0; 2 * n], vec![0.0; 2 * n]);
+        crate::ops::curl::curl_inplace::<f64>(
+            &ux, &uy, &uz, &fkx, &fky, &fkz, &mut cox2, &mut coy2, &mut coz2,
+        );
+        let abs_tol = 16.0 * f64::EPSILON;
+        for (g, c) in [(&gox, &cox2), (&goy, &coy2), (&goz, &coz2)] {
+            for j in 0..2 * n {
+                let abs = (g[j] - c[j]).abs();
+                assert!(
+                    abs <= abs_tol,
+                    "curl twice-rounded mismatch idx {j}: gpu {}, cpu {}, abs {abs:e} > {abs_tol:e}",
+                    g[j],
+                    c[j]
                 );
             }
         }

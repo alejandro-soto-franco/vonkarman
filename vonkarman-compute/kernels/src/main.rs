@@ -61,6 +61,64 @@ mod kernels {
             }
         }
     }
+
+    /// Spectral curl `omega_hat = i k x u_hat`, pointwise.
+    ///
+    /// Mirrors `vonkarman_compute::ops::curl::curl_inplace` and
+    /// `vonkarman_core::spectral_ops::SpectralOps::curl`. The velocity inputs
+    /// `ux`/`uy`/`uz` and the vorticity outputs `ox`/`oy`/`oz` are interleaved
+    /// complex buffers (`[re0, im0, re1, im1, ...]`, length `2 n`); the
+    /// wavenumbers `kx`/`ky`/`kz` are real, length `n`. One thread per spectral
+    /// grid point `i` writes the interleaved `(re, im)` slot `2 i, 2 i + 1`.
+    ///
+    /// Each output component is a difference of two products
+    /// (`ky uz - kz uy`, and cyclic), written so the fork's FMA contraction
+    /// fuses `a * b - c * d` into one `fma.rn.f64` per real output.
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn curl(
+        ux: &[f64],
+        uy: &[f64],
+        uz: &[f64],
+        kx: &[f64],
+        ky: &[f64],
+        kz: &[f64],
+        mut ox: DisjointSlice<f64>,
+        mut oy: DisjointSlice<f64>,
+        mut oz: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        // `kx.len()` is the spectral grid-point count `n`; the complex buffers
+        // have length `2 n`, so guarding on `n` covers both interleaved slots.
+        if i < kx.len() {
+            let re = 2 * i;
+            let im = 2 * i + 1;
+            let kxi = kx[i];
+            let kyi = ky[i];
+            let kzi = kz[i];
+            let uxr = ux[re];
+            let uxi = ux[im];
+            let uyr = uy[re];
+            let uyi = uy[im];
+            let uzr = uz[re];
+            let uzi = uz[im];
+            // SAFETY: `i < n` checked above; all complex output slices have
+            // length `2 n` so both `re` and `im` are in bounds; `i` is a
+            // thread-unique index, and the three outputs are distinct buffers.
+            unsafe {
+                // omega_x = i (ky uz - kz uy)
+                *ox.get_unchecked_mut(re) = -(kyi * uzi - kzi * uyi);
+                *ox.get_unchecked_mut(im) = kyi * uzr - kzi * uyr;
+                // omega_y = i (kz ux - kx uz)
+                *oy.get_unchecked_mut(re) = -(kzi * uxi - kxi * uzi);
+                *oy.get_unchecked_mut(im) = kzi * uxr - kxi * uzr;
+                // omega_z = i (kx uy - ky ux)
+                *oz.get_unchecked_mut(re) = -(kxi * uyi - kyi * uxi);
+                *oz.get_unchecked_mut(im) = kxi * uyr - kyi * uxr;
+            }
+        }
+    }
 }
 
 fn main() {}
