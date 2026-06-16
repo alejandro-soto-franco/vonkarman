@@ -1,0 +1,17 @@
+# Empty [workspace] table makes this crate its OWN workspace root, so cargo
+# never walks up into the vonkarman workspace (keeps the nightly pin + fork
+# cuda-oxide deps isolated from the pure-CPU default build). Built ONLY with
+# `cargo oxide build` to emit PTX; see ../KERNEL_BUILD.md.
+[workspace]
+
+[package]
+name = "vonkarman-kernels"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "GPU kernel sources for vonkarman-compute, compiled to PTX by cuda-oxide"
+
+[dependencies]
+cuda-core = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline" }
+cuda-device = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline" }
+cuda-host = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline" }

@@ -9,3 +9,15 @@ description = "Compute backends (CPU/GPU) for the vonkarman solver"
 vonkarman-core = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }
+
+# GPU backend deps, optional and pulled in only by the `cuda` feature. They are
+# pinned to the cuda-oxide fork branch `pr/fma-and-opt-pipeline`. `cuda-bindings`
+# (via cuda-core) reads CUDA_TOOLKIT_PATH at build, so enabling `cuda` adds a
+# COMPILE-TIME CUDA SDK dependency; the default build stays pure-CPU. The kernel
+# PTX itself is built offline (see kernels/ and KERNEL_BUILD.md), so no kernel
+# codegen happens at library build time.
+cuda-core = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline", optional = true }
+
+[features]
+default = []
+cuda = ["dep:cuda-core"]

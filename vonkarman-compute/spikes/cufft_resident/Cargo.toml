@@ -1,0 +1,16 @@
+[package]
+name = "cufft_resident_spike"
+version = "0.1.0"
+edition = "2024"
+
+# Standalone: NOT a member of the vonkarman workspace.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+libloading = "0.8"
+cuda-core = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline" }
+
+[[bin]]
+name = "cufft_resident"
+path = "src/main.rs"
