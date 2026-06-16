@@ -1125,6 +1125,13 @@ impl CudaBackend {
         // Step 2: pairwise tree reduction, halving the length each pass.
         // Cached handle (Arc bump); module loaded once at construction.
         let reduce = self.funcs.pairwise_reduce.clone();
+        // Defer the spent buffers' frees to end-of-function (see the matching note
+        // in `max_speed_sq`): a `DeviceBuffer` drop is a synchronous `cuMemFree`
+        // that drains the device, so dropping per pass would insert a full sync on
+        // each of the ~log2(n) passes. Allocations are stream-ordered and cheap;
+        // retaining the spent buffers and freeing them after the tail sync is a
+        // pure scheduling change with identical reduction values.
+        let mut spent: Vec<DeviceBuffer<f64>> = Vec::new();
         let mut cur_len = n;
         while cur_len > TAIL {
             let out_len = cur_len.div_ceil(2);
@@ -1158,12 +1165,10 @@ impl CudaBackend {
                 )
                 .expect("sum_norm_sq_device: pairwise_reduce launch failed");
             }
-            // Stream-ordered: the next pass (or the tail download) reads `next`
-            // on the same stream, so no host sync per pass. Dropping the old
-            // `cur` here frees it via `cuMemFree_v2`, which fully synchronises
-            // the device, so the just-launched read of `cur` has completed
-            // before the memory is released (no use-after-free).
-            cur = next;
+            // Stream-ordered: the next pass (or the tail download) reads `next` on
+            // the same stream. The spent `cur` is retained (not dropped here) so
+            // its `cuMemFree` is deferred past the single tail-download sync.
+            spent.push(std::mem::replace(&mut cur, next));
             cur_len = out_len;
         }
 
@@ -1320,6 +1325,17 @@ impl CudaBackend {
         // Step 2: pairwise tree MAX, halving the length each pass.
         // Cached handle (Arc bump); module loaded once at construction.
         let reduce = self.funcs.pairwise_max.clone();
+        // Retain each spent buffer until the function returns rather than dropping
+        // it inside the loop. A `DeviceBuffer` drop calls the SYNCHRONOUS
+        // `cuMemFree`, which drains the whole device; freeing per pass therefore
+        // inserts a full device sync on every one of the ~log2(n) passes and
+        // serialises this CFL reduction against the rest of the resident step
+        // (cfl_dt runs every adaptive step). The allocations are stream-ordered
+        // (`cuMemAllocAsync`) and cheap, so deferring the frees to end-of-function
+        // (after the tail download below has already synchronised once) turns
+        // those per-pass syncs into no-op drains of an already-idle device. This
+        // is a pure scheduling change: the reduction values are identical.
+        let mut spent: Vec<DeviceBuffer<f64>> = Vec::new();
         let mut cur_len = n;
         while cur_len > TAIL {
             let out_len = cur_len.div_ceil(2);
@@ -1352,12 +1368,12 @@ impl CudaBackend {
                 )
                 .expect("max_speed_sq: pairwise_max launch failed");
             }
-            // Stream-ordered: the next pass (or the tail download) reads `next`
-            // on the same stream, so no host sync per pass. Dropping the old
-            // `cur` here frees it via `cuMemFree_v2`, which fully synchronises
-            // the device, so the just-launched read of `cur` has completed
-            // before the memory is released (no use-after-free).
-            cur = next;
+            // Stream-ordered: the next pass (or the tail download) reads `next` on
+            // the same stream, so no host sync per pass. The spent `cur` is kept
+            // alive in `spent` (not dropped here) so its `cuMemFree` is deferred
+            // past the single tail-download sync; the launched read of `cur` has
+            // long completed by then.
+            spent.push(std::mem::replace(&mut cur, next));
             cur_len = out_len;
         }
 

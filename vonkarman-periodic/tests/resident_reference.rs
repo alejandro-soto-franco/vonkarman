@@ -415,6 +415,138 @@ fn taylor_green_re1600_resident_128() {
     );
 }
 
+/// Full 256^3 Taylor-Green Re=1600 dissipation-peak run on the resident GPU,
+/// integrated to t=10 to capture the peak dissipation rate epsilon(t) and compare
+/// it against the N=128 resident run and the Brachet 1983 / van Rees 2011
+/// literature band (peak epsilon ~ 0.0126 near t~9).
+///
+/// This is the resolution study behind the honest accuracy caveat in RESULTS.md:
+/// at N=128 BOTH vonkarman and hit3d over-predict the peak (epsilon ~ 0.020),
+/// which the docs attribute to under-resolution. This run integrates the better-
+/// resolved N=256 grid to completion and REPORTS the peak (it does not assert the
+/// literature band; the point is to measure where N=256 lands). It prints the
+/// epsilon(t) curve so the peak can be read off and plotted.
+///
+/// About half a GPU-hour at N=256 (~900 adaptive steps near 1.5 s each); run
+/// explicitly and detached. Emits `CURVE,t,energy,enstrophy,epsilon` rows and a
+/// `PEAK256` summary line.
+#[test]
+#[ignore] // GPU, ~0.5 hour at N=256 to t=10; run with --ignored --nocapture
+fn taylor_green_re1600_resident_256_dissipation() {
+    let backend = match CudaBackend::new(0) {
+        Ok(be) => be,
+        Err(e) => {
+            eprintln!("skipping 256^3 dissipation run: CudaBackend::new(0) failed: {e}");
+            return;
+        }
+    };
+
+    let n = 256;
+    let nu = 6.25e-4; // Re = 1600
+    let t_final = 10.0;
+    let cfl_safety = 0.5;
+    let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+    let ops = SpectralOps::<f64>::new(&grid);
+    let cplx_len = {
+        let (a, b, c) = grid.spectral_shape();
+        a * b * c
+    };
+
+    // TG IC via the CPU IC path (host only); the resident GPU carries the march.
+    let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let dt0_cpu = cpu.dt();
+    let u0 = cpu.u_hat();
+    let u_hat_flat: [Vec<Complex<f64>>; 3] = [
+        u0[0].iter().copied().collect(),
+        u0[1].iter().copied().collect(),
+        u0[2].iter().copied().collect(),
+    ];
+    let e0 = energy_from_uhat(&u_hat_flat, &grid);
+
+    let mut solver = ResidentSolver::new(backend, grid, nu, &u_hat_flat);
+
+    let dt0_gpu = solver.cfl_dt(cfl_safety, nu);
+    let dt0_rel = (dt0_gpu - dt0_cpu).abs() / dt0_cpu;
+    eprintln!("resident CFL dt at t=0: gpu {dt0_gpu:.6e} vs cpu {dt0_cpu:.6e} (rel {dt0_rel:e})");
+    assert!(dt0_rel < 1e-9, "resident CFL dt diverged from CPU at t=0");
+
+    let mut time = 0.0_f64;
+    let mut dt = dt0_gpu;
+    let mut step = 0u64;
+    let mut peak_enstrophy = 0.0_f64;
+    let mut peak_time = 0.0_f64;
+    let mut peak_epsilon = 0.0_f64;
+    let mut prev_energy = e0;
+
+    let mut host: [Vec<Complex<f64>>; 3] = [
+        vec![Complex::new(0.0, 0.0); cplx_len],
+        vec![Complex::new(0.0, 0.0); cplx_len],
+        vec![Complex::new(0.0, 0.0); cplx_len],
+    ];
+
+    eprintln!("CURVE,t,energy,enstrophy,epsilon");
+    let t_run = std::time::Instant::now();
+
+    while time < t_final {
+        let new_dt = solver.cfl_dt(cfl_safety, nu);
+        if (new_dt - dt).abs() / dt.max(1e-30) > 0.01 {
+            dt = new_dt;
+        }
+        solver.step(dt);
+        time += dt;
+        step += 1;
+
+        // Diagnostic pull every 20 steps (and on the first) to resolve the peak.
+        if step.is_multiple_of(20) || step == 1 {
+            solver.download_u_hat_all(&mut host);
+            let e = energy_from_uhat(&host, &grid);
+            let z = enstrophy_from_uhat(&host, &ops, &grid);
+            let epsilon = 2.0 * nu * z;
+            assert!(
+                e.is_finite() && z.is_finite(),
+                "NaN/Inf at step {step}, t={time}"
+            );
+            assert!(
+                e <= prev_energy + 1e-9 * prev_energy.abs().max(1e-30),
+                "energy increased at step {step}: {prev_energy} -> {e} (t={time})"
+            );
+            if z > peak_enstrophy {
+                peak_enstrophy = z;
+                peak_time = time;
+                peak_epsilon = epsilon;
+            }
+            eprintln!("CURVE,{time:.4},{e:.8e},{z:.8e},{epsilon:.8e}");
+            prev_energy = e;
+        }
+    }
+
+    solver.download_u_hat_all(&mut host);
+    let final_energy = energy_from_uhat(&host, &grid);
+    let run_secs = t_run.elapsed().as_secs_f64();
+
+    eprintln!("\n=== Resident GPU 256^3 dissipation (Re=1600, to t={t_final}) ===");
+    eprintln!(
+        "PEAK256,peak_enstrophy={peak_enstrophy:.6e},peak_epsilon={peak_epsilon:.6e},peak_time={peak_time:.4},final_energy={final_energy:.6e},E0={e0:.6e},steps={step},wall_s={run_secs:.1}"
+    );
+    eprintln!(
+        "Compare: N=128 resident peak epsilon ~2.07e-2 at t~8.68; Brachet/van Rees band ~0.0126 near t~9."
+    );
+
+    // Sanity only (the literature band is REPORTED, not gated, for this study).
+    assert!(
+        peak_time > 7.0 && peak_time < 11.0,
+        "enstrophy peak at t={peak_time}, expected in [7, 11]"
+    );
+    assert!(
+        peak_enstrophy.is_finite() && peak_epsilon > 0.0,
+        "no finite peak captured"
+    );
+    assert!(
+        final_energy < 0.5 * e0,
+        "insufficient energy decay: E0={e0}, E_final={final_energy}"
+    );
+}
+
 /// 256^3 Taylor-Green on the resident path: proves the allocation AND a
 /// sustained sequence of resident steps fit inside the 8 GB RTX 5060, with no
 /// NaN and monotone energy through the early enstrophy rise. This is the memory
