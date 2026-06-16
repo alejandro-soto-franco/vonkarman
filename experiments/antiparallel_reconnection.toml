@@ -1,0 +1,41 @@
+# Anti-parallel vortex-tube reconnection, tuned for a LinkedIn render.
+# Two counter-rotating tubes with a sinusoidal perturbation approach, touch,
+# and reconnect, shedding a bridge. Renders beautifully as a |omega| volume.
+#
+# Run (CPU):    ./target/release/vonkarman run --config experiments/antiparallel_reconnection.toml
+# Run (GPU):    build with --features cuda and set backend = "cufft" below.
+# Output:       output/antiparallel/snapshot_*.h5  +  diagnostics.parquet
+
+[run]
+name = "antiparallel-reconnection"
+output_dir = "./output/antiparallel"
+
+[domain]
+type = "periodic3d"
+n = 128
+l = 6.283185307179586
+backend = "cpu"
+
+[physics]
+nu = 2.0e-3            # Re ~ circulation/nu ~ 500, clean reconnection
+
+[precision]
+tier = "f64"
+
+[integrator]
+method = "etd-rk4"
+cfl_safety = 0.5
+
+[initial_condition]
+type = "anti-parallel-tubes"
+
+[commit_cycle]
+diagnostics_interval = 10
+snapshot_interval = 100000
+# Field frames for the render come from CHECKPOINTS (they store spectral u_hat);
+# scripts/h5_to_vdb.py reads checkpoint_*.h5. ~100 frames over the run; lower
+# for a smoother movie.
+checkpoint_interval = 30
+
+[termination]
+max_steps = 3000

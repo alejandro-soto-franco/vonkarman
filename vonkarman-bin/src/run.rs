@@ -38,6 +38,12 @@ pub fn run(
         // Parse IC type
         let ic = match config.initial_condition.ic_type.as_str() {
             "taylor-green" => IcType::TaylorGreen,
+            "anti-parallel-tubes" | "anti-parallel" => IcType::AntiParallelTubes {
+                circulation: 1.0,
+                core_radius: 0.3,
+                separation: 1.0,
+                perturbation: 0.1,
+            },
             other => return Err(format!("unknown IC type: {other}").into()),
         };
         Periodic3D::new(grid, nu, ic, backend_mode)
