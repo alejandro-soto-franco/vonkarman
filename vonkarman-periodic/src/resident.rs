@@ -1210,4 +1210,130 @@ mod tests {
             );
         }
     }
+
+    /// Three-way per-step wall-clock comparison with repeats (ignored by
+    /// default; run with `--ignored --nocapture`).
+    ///
+    /// For each resolution and each backend (CPU, non-resident cuFFT with a host
+    /// bounce per transform, and the device-resident solver), times an ETD-RK4
+    /// step over several repeats after a warm-up, and reports mean, sample
+    /// standard deviation, and minimum ms/step plus the resident speedups. The
+    /// three solvers are built in separate scopes so their device allocations
+    /// never co-reside (the resident solver alone uses about 6.4 GiB at N=256).
+    /// Each repeat and the summary are printed in a `TIMING,` prefixed CSV line
+    /// so the numbers can be collected verbatim. The CPU and cuFFT solvers use
+    /// adaptive-dt stepping (a few extra inverse transforms for the CFL bound)
+    /// while the resident solver is driven at a fixed dt; the dominant cost (the
+    /// 36 padded transforms per step) is shared by all three.
+    #[test]
+    #[ignore = "GPU 3-way timing harness; run with --ignored --nocapture"]
+    fn three_way_step_timing() {
+        use crate::Periodic3D;
+        use crate::ic::IcType;
+        use vonkarman_core::domain::Domain;
+        use vonkarman_fft::BackendMode;
+
+        // Mean, sample standard deviation, and minimum of a set of timings.
+        fn stats(v: &[f64]) -> (f64, f64, f64) {
+            let n = v.len() as f64;
+            let mean = v.iter().sum::<f64>() / n;
+            let var = if v.len() > 1 {
+                v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
+            } else {
+                0.0
+            };
+            let min = v.iter().cloned().fold(f64::INFINITY, f64::min);
+            (mean, var.sqrt(), min)
+        }
+
+        // Time `steps` per repeat over `reps` repeats on one Domain, after a
+        // warm-up. Returns ms/step for each repeat.
+        fn loops_domain<D: Domain<f64>>(
+            mut d: D,
+            warmup: usize,
+            steps: usize,
+            reps: usize,
+        ) -> Vec<f64> {
+            for _ in 0..warmup {
+                d.step();
+            }
+            (0..reps)
+                .map(|_| {
+                    let t0 = std::time::Instant::now();
+                    for _ in 0..steps {
+                        d.step();
+                    }
+                    1.0e3 * t0.elapsed().as_secs_f64() / steps as f64
+                })
+                .collect()
+        }
+
+        // (N, gpu_steps, gpu_reps, base_steps, base_reps): the CPU and cuFFT
+        // baselines are tens of seconds per step at large N, so they take fewer
+        // steps and repeats than the resident path (the headline number).
+        let configs = [
+            (64usize, 50usize, 5usize, 20usize, 3usize),
+            (128, 30, 5, 5, 3),
+            (256, 20, 5, 2, 3),
+        ];
+        for &(n, gpu_steps, gpu_reps, base_steps, base_reps) in &configs {
+            let Some(backend) = backend_or_skip() else {
+                return;
+            };
+            let nu = 0.01;
+            let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+
+            let base = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+            let dt = base.dt();
+            let u0 = base.u_hat();
+            let u_hat_flat = [flat(&u0[0]), flat(&u0[1]), flat(&u0[2])];
+            drop(base);
+
+            let cpu = {
+                let d = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+                loops_domain(d, 2, base_steps, base_reps)
+            };
+            let cufft = {
+                let d = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cufft);
+                loops_domain(d, 2, base_steps, base_reps)
+            };
+            let resident = {
+                let mut solver = ResidentSolver::new(backend, grid, nu, &u_hat_flat);
+                for _ in 0..5 {
+                    solver.step(dt);
+                }
+                (0..gpu_reps)
+                    .map(|_| {
+                        let t0 = std::time::Instant::now();
+                        for _ in 0..gpu_steps {
+                            solver.step(dt);
+                        }
+                        1.0e3 * t0.elapsed().as_secs_f64() / gpu_steps as f64
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            for (mode, v) in [
+                ("cpu", &cpu),
+                ("cufft_nonresident", &cufft),
+                ("resident", &resident),
+            ] {
+                for (r, ms) in v.iter().enumerate() {
+                    eprintln!("TIMING,{n},{mode},{r},{ms:.4}");
+                }
+            }
+
+            let (cpu_m, cpu_s, cpu_min) = stats(&cpu);
+            let (cuf_m, cuf_s, cuf_min) = stats(&cufft);
+            let (res_m, res_s, res_min) = stats(&resident);
+            eprintln!(
+                "SUMMARY N={n}: CPU {cpu_m:.2}+/-{cpu_s:.2} (min {cpu_min:.2}) | \
+                 cuFFT-nonresident {cuf_m:.2}+/-{cuf_s:.2} (min {cuf_min:.2}) | \
+                 resident {res_m:.2}+/-{res_s:.2} (min {res_min:.2}) ms/step | \
+                 resident-vs-CPU {:.2}x | resident-vs-cuFFT {:.2}x",
+                cpu_m / res_m,
+                cuf_m / res_m
+            );
+        }
+    }
 }
