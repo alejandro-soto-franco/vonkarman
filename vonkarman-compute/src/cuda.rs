@@ -292,6 +292,95 @@ impl CudaBackend {
         }
         stream.synchronize()
     }
+
+    /// Leray projection `u_hat -= k (k . u_hat) / |k|^2`, in place over resident
+    /// device buffers.
+    ///
+    /// Loads the offline-compiled `leray` kernel from the checked-in PTX and
+    /// launches it on the default stream, then synchronises. The velocity
+    /// components `ux`/`uy`/`uz` are interleaved complex buffers of `n` spectral
+    /// points (length `2 n`), modified in place; `kx`/`ky`/`kz` and `k2`
+    /// (`= |k|^2`, the value the CPU stores in `k_mag_sq`) are real buffers of
+    /// length `n` in the same flat order. The `k = 0` mode is left unchanged.
+    ///
+    /// Mirrors [`crate::ops::leray::leray_inplace`]; the GPU fuses the final
+    /// `a - b * c` subtraction (and the dot-product accumulation) into
+    /// `fma.rn.f64`, so results differ from the twice-rounded scalar CPU path by
+    /// about one ULP per real output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn leray_project<F: Float>(
+        &self,
+        kx: &RealBuf<F>,
+        ky: &RealBuf<F>,
+        kz: &RealBuf<F>,
+        k2: &RealBuf<F>,
+        ux: &mut CplxBuf<F>,
+        uy: &mut CplxBuf<F>,
+        uz: &mut CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let n = kx.buf.len();
+        debug_assert!(
+            ky.buf.len() == n
+                && kz.buf.len() == n
+                && k2.buf.len() == n
+                && ux.buf.len() == 2 * n
+                && uy.buf.len() == 2 * n
+                && uz.buf.len() == 2 * n,
+            "leray_project: complex buffers must be length 2n, wavenumber buffers length n"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("leray")?;
+
+        // Param order matches the kernel signature: kx, ky, kz, k2, ux, uy, uz.
+        // Each &[f64] / DisjointSlice<f64> lowers to a (ptr, len) pair. The
+        // wavenumber buffers report length n; the complex buffers 2n.
+        let mut ptrs = [
+            kx.buf.cu_deviceptr(),
+            ky.buf.cu_deviceptr(),
+            kz.buf.cu_deviceptr(),
+            k2.buf.cu_deviceptr(),
+            ux.buf.cu_deviceptr(),
+            uy.buf.cu_deviceptr(),
+            uz.buf.cu_deviceptr(),
+        ];
+        let mut lens: [u64; 7] = [
+            n as u64,
+            n as u64,
+            n as u64,
+            n as u64,
+            (2 * n) as u64,
+            (2 * n) as u64,
+            (2 * n) as u64,
+        ];
+
+        let mut params: [*mut std::ffi::c_void; 14] = [std::ptr::null_mut(); 14];
+        for k in 0..7 {
+            params[2 * k] = &mut ptrs[k] as *mut _ as *mut std::ffi::c_void;
+            params[2 * k + 1] = &mut lens[k] as *mut _ as *mut std::ffi::c_void;
+        }
+
+        // One thread per spectral grid point (n).
+        let cfg = LaunchConfig::for_num_elems(n as u32);
+        // SAFETY: `func` came from a module loaded on `self.ctx`; the stream
+        // belongs to the same context; the 14 params alias live device
+        // pointers / lengths in the (ptr, len) order the PTX expects; the grid
+        // is sized for `n` grid points and the kernel bounds-checks `i < n`.
+        // Params outlive the call (synchronise below before they drop).
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
 }
 
 impl ComputeBackend for CudaBackend {
@@ -697,6 +786,154 @@ mod tests {
                     c[j]
                 );
             }
+        }
+    }
+
+    /// FMA-matched CPU oracle for the Leray projection.
+    ///
+    /// Reproduces the kernel's exact arithmetic grouping: pre-scale `k` by
+    /// `1 / k2` (`sx = kx / k2`), then write `u - sx * kdu`, which the fork
+    /// fuses into one `fma.rn.f64`. The dot product `kx u_x + ky u_y + kz u_z`
+    /// also accumulates via `mul_add` to match the kernel's contracted form.
+    fn leray_oracle_fma(
+        kx: &[f64],
+        ky: &[f64],
+        kz: &[f64],
+        k2: &[f64],
+        ux: &[f64],
+        uy: &[f64],
+        uz: &[f64],
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n = kx.len();
+        let (mut ox, mut oy, mut oz) = (ux.to_vec(), uy.to_vec(), uz.to_vec());
+        for i in 0..n {
+            let k2i = k2[i];
+            if k2i < 1e-30 {
+                continue;
+            }
+            let (re, im) = (2 * i, 2 * i + 1);
+            let (kxi, kyi, kzi) = (kx[i], ky[i], kz[i]);
+            let inv_k2 = 1.0 / k2i;
+            let (uxr, uxi) = (ux[re], ux[im]);
+            let (uyr, uyi) = (uy[re], uy[im]);
+            let (uzr, uzi) = (uz[re], uz[im]);
+            // Dot product, accumulated with mul_add (matches FMA contraction).
+            let kdu_re = kzi.mul_add(uzr, kyi.mul_add(uyr, kxi * uxr));
+            let kdu_im = kzi.mul_add(uzi, kyi.mul_add(uyi, kxi * uxi));
+            let sx = kxi * inv_k2;
+            let sy = kyi * inv_k2;
+            let sz = kzi * inv_k2;
+            // u - s * kdu fuses to fma(-s, kdu, u).
+            ox[re] = sx.mul_add(-kdu_re, uxr);
+            ox[im] = sx.mul_add(-kdu_im, uxi);
+            oy[re] = sy.mul_add(-kdu_re, uyr);
+            oy[im] = sy.mul_add(-kdu_im, uyi);
+            oz[re] = sz.mul_add(-kdu_re, uzr);
+            oz[im] = sz.mul_add(-kdu_im, uzi);
+        }
+        (ox, oy, oz)
+    }
+
+    #[test]
+    fn leray_matches_cpu_oracle_and_is_divergence_free() {
+        use vonkarman_core::field::GridSpec;
+        use vonkarman_core::spectral_ops::SpectralOps;
+
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+
+        // Real wavenumbers and |k|^2 from the same SpectralOps the reference
+        // uses, so GPU and CPU share identical k and k2 values.
+        let grid = GridSpec::cubic(16, 2.0 * std::f64::consts::PI);
+        let ops = SpectralOps::<f64>::new(&grid);
+        let (snx, sny, snz) = grid.spectral_shape();
+        let n = snx * sny * snz;
+        let (mut fkx, mut fky, mut fkz, mut fk2) = (
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        );
+        for ix in 0..snx {
+            for iy in 0..sny {
+                for iz in 0..snz {
+                    fkx.push(ops.kx[ix]);
+                    fky.push(ops.ky[iy]);
+                    fkz.push(ops.kz[iz]);
+                    fk2.push(ops.k_mag_sq[[ix, iy, iz]]);
+                }
+            }
+        }
+
+        let make = |seed: f64| -> Vec<f64> {
+            (0..2 * n)
+                .map(|j| (seed + 0.013 * j as f64).sin() * 1.4 + 0.35)
+                .collect()
+        };
+        let ux = make(0.2);
+        let uy = make(1.1);
+        let uz = make(3.3);
+
+        // GPU path on resident buffers; the velocity buffers are projected in
+        // place. Reinterpret the uploaded real (2n) buffers as complex (n).
+        let dkx = be.upload_real::<f64>(&fkx);
+        let dky = be.upload_real::<f64>(&fky);
+        let dkz = be.upload_real::<f64>(&fkz);
+        let dk2 = be.upload_real::<f64>(&fk2);
+        let dux = be.upload_real::<f64>(&ux);
+        let duy = be.upload_real::<f64>(&uy);
+        let duz = be.upload_real::<f64>(&uz);
+        let mut cux = CplxBuf::<f64> { buf: dux.buf, len: n, _marker: std::marker::PhantomData };
+        let mut cuy = CplxBuf::<f64> { buf: duy.buf, len: n, _marker: std::marker::PhantomData };
+        let mut cuz = CplxBuf::<f64> { buf: duz.buf, len: n, _marker: std::marker::PhantomData };
+        be.leray_project::<f64>(&dkx, &dky, &dkz, &dk2, &mut cux, &mut cuy, &mut cuz)
+            .expect("GPU leray launch failed");
+
+        let mut hux = vec![Complex::new(0.0_f64, 0.0); n];
+        let mut huy = vec![Complex::new(0.0_f64, 0.0); n];
+        let mut huz = vec![Complex::new(0.0_f64, 0.0); n];
+        be.download_cplx(&cux, &mut hux);
+        be.download_cplx(&cuy, &mut huy);
+        be.download_cplx(&cuz, &mut huz);
+        let to_flat = |h: &[Complex<f64>]| -> Vec<f64> {
+            let mut v = Vec::with_capacity(2 * h.len());
+            for c in h {
+                v.push(c.re);
+                v.push(c.im);
+            }
+            v
+        };
+        let (gux, guy, guz) = (to_flat(&hux), to_flat(&huy), to_flat(&huz));
+
+        // FMA-matched oracle. The projected components are differences of an
+        // O(1) field and an O(1) correction, so under cancellation a single
+        // value can be small while the operands are O(1); accept EITHER a tight
+        // relative bound OR an absolute bound (one fused-vs-unfused product,
+        // ~eps * |product|, products O(few)), the cross/curl cancellation rule.
+        let (oox, ooy, ooz) = leray_oracle_fma(&fkx, &fky, &fkz, &fk2, &ux, &uy, &uz);
+        let rel_tol = 1e-14;
+        let abs_floor = 8.0 * f64::EPSILON;
+        for (g, o) in [(&gux, &oox), (&guy, &ooy), (&guz, &ooz)] {
+            for j in 0..2 * n {
+                let d = (g[j] - o[j]).abs();
+                let rel = d / o[j].abs().max(f64::MIN_POSITIVE);
+                assert!(
+                    rel <= rel_tol || d <= abs_floor,
+                    "leray oracle mismatch idx {j}: gpu {}, oracle {}, rel {rel:e}, abs {d:e}",
+                    g[j],
+                    o[j]
+                );
+            }
+        }
+
+        // The projected GPU field must be divergence-free: k . u_hat ~ 0.
+        for i in 0..n {
+            let (re, im) = (2 * i, 2 * i + 1);
+            let div_re = fkx[i] * gux[re] + fky[i] * guy[re] + fkz[i] * guz[re];
+            let div_im = fkx[i] * gux[im] + fky[i] * guy[im] + fkz[i] * guz[im];
+            let mag = (div_re * div_re + div_im * div_im).sqrt();
+            assert!(mag < 1e-12, "GPU divergence at flat idx {i} = {mag:e}");
         }
     }
 }

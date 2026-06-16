@@ -200,6 +200,104 @@ $L__BB1_2:                              // %bb10
 	ret;
                                         // -- End function
 }
+	// .globl	leray                   // -- Begin function leray
+.visible .entry leray(
+	.param .u64 .ptr .align 1 leray_param_0,
+	.param .u64 leray_param_1,
+	.param .u64 .ptr .align 1 leray_param_2,
+	.param .u64 leray_param_3,
+	.param .u64 .ptr .align 1 leray_param_4,
+	.param .u64 leray_param_5,
+	.param .u64 .ptr .align 1 leray_param_6,
+	.param .u64 leray_param_7,
+	.param .u64 .ptr .align 1 leray_param_8,
+	.param .u64 leray_param_9,
+	.param .u64 .ptr .align 1 leray_param_10,
+	.param .u64 leray_param_11,
+	.param .u64 .ptr .align 1 leray_param_12,
+	.param .u64 leray_param_13
+)                                       // @leray
+{
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<57>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd10, [leray_param_0];
+	ld.param.b64 	%rd11, [leray_param_6];
+	cvta.to.global.u64 	%rd1, %rd11;
+	ld.param.b64 	%rd12, [leray_param_1];
+	cvta.to.global.u64 	%rd2, %rd10;
+	ld.param.b64 	%rd13, [leray_param_2];
+	cvta.to.global.u64 	%rd3, %rd13;
+	ld.param.b64 	%rd14, [leray_param_4];
+	cvta.to.global.u64 	%rd4, %rd14;
+	ld.param.b64 	%rd15, [leray_param_8];
+	cvta.to.global.u64 	%rd5, %rd15;
+	ld.param.b64 	%rd16, [leray_param_10];
+	cvta.to.global.u64 	%rd6, %rd16;
+	ld.param.b64 	%rd17, [leray_param_12];
+	cvta.to.global.u64 	%rd7, %rd17;
+	mov.u32 	%r1, %tid.x;
+	cvt.u64.u32 	%rd18, %r1;
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mul.wide.u32 	%rd19, %r2, %r3;
+	add.s64 	%rd8, %rd19, %rd18;
+	setp.ge.u64 	%p1, %rd8, %rd12;
+	@%p1 bra 	$L__BB2_3;
+// %bb.1:                               // %bb2
+	shl.b64 	%rd20, %rd8, 3;
+	add.s64 	%rd21, %rd1, %rd20;
+	ld.global.b64 	%rd9, [%rd21];
+	setp.ltu.f64 	%p2, %rd9, 0d39B4484BFEEBC2A0;
+	@%p2 bra 	$L__BB2_3;
+// %bb.2:                               // %bb4
+	add.s64 	%rd22, %rd2, %rd20;
+	ld.global.b64 	%rd23, [%rd22];
+	add.s64 	%rd24, %rd3, %rd20;
+	ld.global.b64 	%rd25, [%rd24];
+	add.s64 	%rd26, %rd4, %rd20;
+	ld.global.b64 	%rd27, [%rd26];
+	rcp.rn.f64 	%rd28, %rd9;
+	shl.b64 	%rd29, %rd8, 4;
+	add.s64 	%rd30, %rd5, %rd29;
+	ld.global.b64 	%rd31, [%rd30];
+	ld.global.b64 	%rd32, [%rd30+8];
+	add.s64 	%rd33, %rd6, %rd29;
+	ld.global.b64 	%rd34, [%rd33];
+	ld.global.b64 	%rd35, [%rd33+8];
+	add.s64 	%rd36, %rd7, %rd29;
+	ld.global.b64 	%rd37, [%rd36];
+	ld.global.b64 	%rd38, [%rd36+8];
+	mul.f64 	%rd39, %rd25, %rd34;
+	fma.rn.f64 	%rd40, %rd23, %rd31, %rd39;
+	fma.rn.f64 	%rd41, %rd27, %rd37, %rd40;
+	mul.f64 	%rd42, %rd25, %rd35;
+	fma.rn.f64 	%rd43, %rd23, %rd32, %rd42;
+	fma.rn.f64 	%rd44, %rd27, %rd38, %rd43;
+	mul.f64 	%rd45, %rd28, %rd23;
+	mul.f64 	%rd46, %rd28, %rd25;
+	mul.f64 	%rd47, %rd28, %rd27;
+	neg.f64 	%rd48, %rd45;
+	fma.rn.f64 	%rd49, %rd48, %rd41, %rd31;
+	st.global.b64 	[%rd30], %rd49;
+	fma.rn.f64 	%rd50, %rd48, %rd44, %rd32;
+	st.global.b64 	[%rd30+8], %rd50;
+	neg.f64 	%rd51, %rd46;
+	fma.rn.f64 	%rd52, %rd51, %rd41, %rd34;
+	st.global.b64 	[%rd33], %rd52;
+	fma.rn.f64 	%rd53, %rd51, %rd44, %rd35;
+	st.global.b64 	[%rd33+8], %rd53;
+	neg.f64 	%rd54, %rd47;
+	fma.rn.f64 	%rd55, %rd54, %rd41, %rd37;
+	st.global.b64 	[%rd36], %rd55;
+	fma.rn.f64 	%rd56, %rd54, %rd44, %rd38;
+	st.global.b64 	[%rd36+8], %rd56;
+$L__BB2_3:                              // %bb8
+	ret;
+                                        // -- End function
+}
 	// .globl	cuda_device____internal__index_1d // -- Begin function cuda_device____internal__index_1d
 .visible .func  (.param .b64 func_retval0) cuda_device____internal__index_1d(
 	.param .b64 cuda_device____internal__index_1d_param_0

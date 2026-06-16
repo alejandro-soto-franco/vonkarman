@@ -6,6 +6,8 @@
 
 pub mod cross;
 pub mod curl;
+pub mod leray;
 
 pub use cross::cross_product_inplace;
 pub use curl::curl_inplace;
+pub use leray::leray_inplace;

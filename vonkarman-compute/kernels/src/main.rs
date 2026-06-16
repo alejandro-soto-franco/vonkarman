@@ -119,6 +119,71 @@ mod kernels {
             }
         }
     }
+
+    /// Leray projection `u_hat -= k (k . u_hat) / |k|^2`, pointwise in place.
+    ///
+    /// Mirrors `vonkarman_compute::ops::leray::leray_inplace` and
+    /// `vonkarman_core::spectral_ops::SpectralOps::leray_project`. The velocity
+    /// components `ux`/`uy`/`uz` are interleaved complex buffers (length `2 n`)
+    /// modified in place; `kx`/`ky`/`kz` and `k2` (`= |k|^2`) are real (length
+    /// `n`). The `k = 0` mode (`k2 < 1e-30`) is left unchanged (mean flow).
+    ///
+    /// Each update is `u - (k / k2) (k . u)`, written so the fork fuses the
+    /// final `a - b * c` subtraction into one `fma.rn.f64` per real output.
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn leray(
+        kx: &[f64],
+        ky: &[f64],
+        kz: &[f64],
+        k2: &[f64],
+        mut ux: DisjointSlice<f64>,
+        mut uy: DisjointSlice<f64>,
+        mut uz: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < kx.len() {
+            let k2i = k2[i];
+            // Skip the k = 0 mode (preserve mean flow). The tiny floor matches
+            // the CPU reference exactly.
+            if k2i >= 1e-30 {
+                let re = 2 * i;
+                let im = 2 * i + 1;
+                let kxi = kx[i];
+                let kyi = ky[i];
+                let kzi = kz[i];
+                let inv_k2 = 1.0 / k2i;
+                // SAFETY: `i < n` (kx.len()) checked above; the complex slices
+                // have length `2 n` so `re` and `im` are in bounds; `i` is a
+                // thread-unique index and the three buffers are distinct.
+                unsafe {
+                    let uxr = *ux.get_unchecked_mut(re);
+                    let uxi = *ux.get_unchecked_mut(im);
+                    let uyr = *uy.get_unchecked_mut(re);
+                    let uyi = *uy.get_unchecked_mut(im);
+                    let uzr = *uz.get_unchecked_mut(re);
+                    let uzi = *uz.get_unchecked_mut(im);
+
+                    // k . u_hat (complex dot with real k).
+                    let kdu_re = kxi * uxr + kyi * uyr + kzi * uzr;
+                    let kdu_im = kxi * uxi + kyi * uyi + kzi * uzi;
+
+                    // u_hat -= (k / k2) (k . u_hat). Pre-scale each k by 1/k2 so
+                    // the final subtraction `u - scale * kdu` fuses to one FMA.
+                    let sx = kxi * inv_k2;
+                    let sy = kyi * inv_k2;
+                    let sz = kzi * inv_k2;
+                    *ux.get_unchecked_mut(re) = uxr - sx * kdu_re;
+                    *ux.get_unchecked_mut(im) = uxi - sx * kdu_im;
+                    *uy.get_unchecked_mut(re) = uyr - sy * kdu_re;
+                    *uy.get_unchecked_mut(im) = uyi - sy * kdu_im;
+                    *uz.get_unchecked_mut(re) = uzr - sz * kdu_re;
+                    *uz.get_unchecked_mut(im) = uzi - sz * kdu_im;
+                }
+            }
+        }
+    }
 }
 
 fn main() {}
