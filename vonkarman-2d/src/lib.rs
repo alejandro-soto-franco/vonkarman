@@ -5,9 +5,13 @@
 //! conventions: state lives in spectral space, the nonlinear term is formed in
 //! physical space and dealiased (2/3 rule), and viscosity is integrated exactly
 //! via an integrating factor (here IF-RK4). Because 2D is cheap, it runs at
-//! 1024^2+ where the fine filaments are genuinely RESOLVED, so a passive dye
+//! 1024^2+ where the fine filaments are genuinely RESOLVED, so passive dye
 //! advecting through it looks like the "incredible" graphics-fluid visuals
 //! without any noise-upres or vorticity-confinement cheats.
+//!
+//! Two NON-cancelling dyes (gold density and rust density, each >= 0) are
+//! advected, so turbulent mixing reads as interleaved filaments and an orange
+//! blend rather than fading to black (which a single signed dye would do).
 //!
 //! Vorticity transport:  d(omega)/dt + u . grad(omega) = nu lap(omega)
 //! Dye transport:        d(c)/dt     + u . grad(c)     = kappa lap(c)
@@ -133,12 +137,6 @@ impl Spectral2D {
         Zip::from(&mut nh).and(&self.dealias).for_each(|c, &m| *c *= m);
         nh
     }
-
-    /// Nonlinear right-hand sides for vorticity and dye sharing one velocity.
-    fn rhs(&self, wh: &Array2<C>, ch: &Array2<C>) -> (Array2<C>, Array2<C>) {
-        let (u, v) = self.velocity(wh);
-        (self.advect(wh, &u, &v), self.advect(ch, &u, &v))
-    }
 }
 
 /// Real integrating-factor `exp(-coeff * |k|^2 * dt)` over the half-spectrum.
@@ -161,11 +159,13 @@ fn scale(a: &Array2<C>, r: &Array2<f64>) -> Array2<C> {
     o
 }
 
-/// A running 2D simulation: vorticity + dye state and the fixed-dt IF-RK4 maps.
+/// A running 2D simulation: vorticity + two dye fields and the fixed-dt IF-RK4
+/// maps. Gold and rust dye are advected by the same flow and never cancel.
 pub struct Sim {
     pub spec: Spectral2D,
     pub wh: Array2<C>, // vorticity (spectral)
-    pub ch: Array2<C>, // dye (spectral)
+    pub gh: Array2<C>, // gold dye (spectral)
+    pub rh: Array2<C>, // rust dye (spectral)
     dt: f64,
     ew: Array2<f64>,
     ew2: Array2<f64>,
@@ -174,118 +174,176 @@ pub struct Sim {
 }
 
 impl Sim {
-    pub fn new(spec: Spectral2D, wh: Array2<C>, ch: Array2<C>, dt: f64, nu: f64, kappa: f64) -> Self {
+    pub fn new(
+        spec: Spectral2D,
+        wh: Array2<C>,
+        gh: Array2<C>,
+        rh: Array2<C>,
+        dt: f64,
+        nu: f64,
+        kappa: f64,
+    ) -> Self {
         let ew = integ_factor(&spec, nu, dt);
         let ew2 = integ_factor(&spec, nu, dt * 0.5);
         let ec = integ_factor(&spec, kappa, dt);
         let ec2 = integ_factor(&spec, kappa, dt * 0.5);
-        Self { spec, wh, ch, dt, ew, ew2, ec, ec2 }
+        Self { spec, wh, gh, rh, dt, ew, ew2, ec, ec2 }
     }
 
-    /// One IF-RK4 step. Standard integrating-factor RK4 (reduces to RK4 when
-    /// viscosity is zero, exact when the nonlinear term is zero), stepping
-    /// vorticity and dye together through one shared velocity per stage.
+    /// One IF-RK4 step for vorticity + the two dyes, sharing one velocity per
+    /// stage. Standard integrating-factor RK4 (reduces to RK4 with zero
+    /// viscosity, exact with zero nonlinear term).
     pub fn step(&mut self) {
         let dt = self.dt;
         let s = &self.spec;
-        let comb = |e: &Array2<f64>, base: &Array2<C>, f: f64, k: &Array2<C>| -> Array2<C> {
-            // e .* (base + f*k)
-            scale(&(base + &k.mapv(|c| c * f)), e)
+        // nonlinear RHS for all three fields from one velocity (the stage omega)
+        let rhs = |w: &Array2<C>, g: &Array2<C>, r: &Array2<C>| {
+            let (u, v) = s.velocity(w);
+            (s.advect(w, &u, &v), s.advect(g, &u, &v), s.advect(r, &u, &v))
         };
-
-        let (k1w, k1c) = s.rhs(&self.wh, &self.ch);
-        let a2w = comb(&self.ew2, &self.wh, dt * 0.5, &k1w);
-        let a2c = comb(&self.ec2, &self.ch, dt * 0.5, &k1c);
-        let (k2w, k2c) = s.rhs(&a2w, &a2c);
-        // e2 .* base + (dt/2) k
-        let a3w = &scale(&self.wh, &self.ew2) + &k2w.mapv(|c| c * (dt * 0.5));
-        let a3c = &scale(&self.ch, &self.ec2) + &k2c.mapv(|c| c * (dt * 0.5));
-        let (k3w, k3c) = s.rhs(&a3w, &a3c);
-        // e .* base + dt (e2 .* k)
-        let a4w = &scale(&self.wh, &self.ew) + &scale(&k3w, &self.ew2).mapv(|c| c * dt);
-        let a4c = &scale(&self.ch, &self.ec) + &scale(&k3c, &self.ec2).mapv(|c| c * dt);
-        let (k4w, k4c) = s.rhs(&a4w, &a4c);
-
-        let upd = |e: &Array2<f64>, e2: &Array2<f64>, base: &Array2<C>,
-                   k1: &Array2<C>, k2: &Array2<C>, k3: &Array2<C>, k4: &Array2<C>| -> Array2<C> {
+        // per-field stage builders (E = field's integrating factor)
+        let st2 = |e2: &Array2<f64>, base: &Array2<C>, k: &Array2<C>| {
+            scale(&(base + &k.mapv(|c| c * (dt * 0.5))), e2)
+        };
+        let st3 = |e2: &Array2<f64>, base: &Array2<C>, k: &Array2<C>| {
+            &scale(base, e2) + &k.mapv(|c| c * (dt * 0.5))
+        };
+        let st4 = |e: &Array2<f64>, e2: &Array2<f64>, base: &Array2<C>, k: &Array2<C>| {
+            &scale(base, e) + &scale(k, e2).mapv(|c| c * dt)
+        };
+        let fin = |e: &Array2<f64>, e2: &Array2<f64>, base: &Array2<C>,
+                   k1: &Array2<C>, k2: &Array2<C>, k3: &Array2<C>, k4: &Array2<C>| {
+            let term = scale(k1, e) + scale(&(k2 + k3), e2).mapv(|c| c * 2.0) + k4;
             let mut out = scale(base, e);
-            let term = scale(k1, e)
-                + scale(&(k2 + k3), e2).mapv(|c| c * 2.0)
-                + k4;
-            Zip::from(&mut out)
-                .and(&term)
-                .for_each(|o, &t| *o += t * (dt / 6.0));
+            Zip::from(&mut out).and(&term).for_each(|o, &t| *o += t * (dt / 6.0));
             out
         };
-        self.wh = upd(&self.ew, &self.ew2, &self.wh, &k1w, &k2w, &k3w, &k4w);
-        self.ch = upd(&self.ec, &self.ec2, &self.ch, &k1c, &k2c, &k3c, &k4c);
+
+        let (ew, ew2, ec, ec2) = (&self.ew, &self.ew2, &self.ec, &self.ec2);
+        let (k1w, k1g, k1r) = rhs(&self.wh, &self.gh, &self.rh);
+        let (a2w, a2g, a2r) = (
+            st2(ew2, &self.wh, &k1w),
+            st2(ec2, &self.gh, &k1g),
+            st2(ec2, &self.rh, &k1r),
+        );
+        let (k2w, k2g, k2r) = rhs(&a2w, &a2g, &a2r);
+        let (a3w, a3g, a3r) = (
+            st3(ew2, &self.wh, &k2w),
+            st3(ec2, &self.gh, &k2g),
+            st3(ec2, &self.rh, &k2r),
+        );
+        let (k3w, k3g, k3r) = rhs(&a3w, &a3g, &a3r);
+        let (a4w, a4g, a4r) = (
+            st4(ew, ew2, &self.wh, &k3w),
+            st4(ec, ec2, &self.gh, &k3g),
+            st4(ec, ec2, &self.rh, &k3r),
+        );
+        let (k4w, k4g, k4r) = rhs(&a4w, &a4g, &a4r);
+
+        let nw = fin(ew, ew2, &self.wh, &k1w, &k2w, &k3w, &k4w);
+        let ng = fin(ec, ec2, &self.gh, &k1g, &k2g, &k3g, &k4g);
+        let nr = fin(ec, ec2, &self.rh, &k1r, &k2r, &k3r, &k4r);
+        self.wh = nw;
+        self.gh = ng;
+        self.rh = nr;
     }
 
-    /// Physical dye field (real space), for rendering.
-    pub fn dye(&self) -> Array2<f64> {
-        self.spec.inverse(&self.ch)
+    /// Physical gold and rust dye fields (real space), for rendering.
+    pub fn dyes(&self) -> (Array2<f64>, Array2<f64>) {
+        (self.spec.inverse(&self.gh), self.spec.inverse(&self.rh))
     }
 }
 
-/// Two co-rotating Lamb-Oseen vortices, with gold dye in one and rust-red dye
-/// in the other. The same-sign vortices orbit and merge, winding the two dyes
-/// into a double spiral (two "tornados" twisting together and connecting).
+/// Two co-rotating Lamb-Oseen vortices: gold dye in one, rust-red in the other.
+/// They orbit cleanly, then (with the band-limited noise seeding a shear
+/// instability at high Re) shed and fray the dyes into interleaving filaments.
 ///
-/// Returns spectral `(omega_hat, dye_hat)`. `dye` is signed: `+1` gold, `-1`
-/// rust. Profiles are smooth (super-Gaussian) to avoid Gibbs ringing.
+/// Returns spectral `(omega_hat, gold_hat, rust_hat)`; the dyes are independent
+/// non-negative densities. A slight strength asymmetry plus the noise breaks the
+/// symmetry so an instability actually grows.
 pub fn co_rotating_vortices(
     spec: &Spectral2D,
     sep: f64,
     core: f64,
     circ: f64,
-) -> (Array2<C>, Array2<C>) {
+    noise: f64,
+    seed: u64,
+) -> (Array2<C>, Array2<C>, Array2<C>) {
     let n = spec.n();
     let dx = std::f64::consts::TAU / n as f64;
-    let cx = std::f64::consts::PI;
-    let cy = std::f64::consts::PI;
+    let (cx, cy) = (std::f64::consts::PI, std::f64::consts::PI);
     let amp = circ / (std::f64::consts::PI * core * core);
     let mut omega = Array2::<f64>::zeros((n, n));
-    let mut dye = Array2::<f64>::zeros((n, n));
-    let centres = [(cx - 0.5 * sep, cy), (cx + 0.5 * sep, cy)];
+    let mut gold = Array2::<f64>::zeros((n, n));
+    let mut rust = Array2::<f64>::zeros((n, n));
+    let centres = [(cx - 0.5 * sep, cy, 1.0_f64), (cx + 0.5 * sep, cy, 0.97_f64)];
     let rd = 1.1 * core;
     for i in 0..n {
         let x = i as f64 * dx;
         for j in 0..n {
             let y = j as f64 * dx;
             let mut w = 0.0;
-            for (vc, &(px, py)) in centres.iter().enumerate() {
+            for (vc, &(px, py, str)) in centres.iter().enumerate() {
                 let r2 = (x - px) * (x - px) + (y - py) * (y - py);
-                w += amp * (-r2 / (core * core)).exp();
-                // smooth dye disc (super-Gaussian), gold for vortex 0, rust for 1
+                w += str * amp * (-r2 / (core * core)).exp();
                 let d = (-(r2 / (rd * rd)).powi(2)).exp();
-                dye[[i, j]] += if vc == 0 { d } else { -d };
+                if vc == 0 {
+                    gold[[i, j]] += d;
+                } else {
+                    rust[[i, j]] += d;
+                }
             }
             omega[[i, j]] = w;
         }
     }
-    (spec.forward(&omega), spec.forward(&dye))
+    if noise > 0.0 {
+        let mut st = seed | 1;
+        let mut rand = || {
+            st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (st >> 33) as f64 / (1u64 << 31) as f64 // [0, 2)
+        };
+        let (kmin, kmax) = (3.0, 10.0);
+        let mut modes: Vec<(f64, f64, f64)> = Vec::new();
+        while modes.len() < 36 {
+            let kxm = (rand() * kmax - kmax * 0.5).round() * 2.0;
+            let kym = (rand() * kmax - kmax * 0.5).round() * 2.0;
+            let kk = (kxm * kxm + kym * kym).sqrt();
+            if kk >= kmin && kk <= kmax {
+                modes.push((kxm, kym, rand() * std::f64::consts::PI));
+            }
+        }
+        let scale = noise * amp / (modes.len() as f64).sqrt();
+        for i in 0..n {
+            let x = i as f64 * dx;
+            for j in 0..n {
+                let y = j as f64 * dx;
+                let mut sm = 0.0;
+                for &(kxm, kym, ph) in &modes {
+                    sm += (kxm * x + kym * y + ph).cos();
+                }
+                omega[[i, j]] += scale * sm;
+            }
+        }
+    }
+    (spec.forward(&omega), spec.forward(&gold), spec.forward(&rust))
 }
 
-/// Write the signed dye field to a PNG: gold for positive, rust-red for
-/// negative, on black, with a gamma lift for punch. Values are clamped to the
-/// seeded `[-1, 1]` range.
-pub fn write_dye_png(dye: &Array2<f64>, path: &str) {
-    let n = dye.shape()[0] as u32;
-    let gold = [1.0_f64, 0.78, 0.23];
-    let rust = [0.72_f64, 0.25, 0.05];
-    let gamma = 0.80;
+/// Write the two dye densities to a PNG: gold + rust added on black (overlap
+/// blends to orange), with a gamma lift so thin frayed filaments stay visible.
+pub fn write_dye_png(gold: &Array2<f64>, rust: &Array2<f64>, path: &str) {
+    let n = gold.shape()[0] as u32;
+    let gcol = [1.0_f64, 0.78, 0.23];
+    let rcol = [0.72_f64, 0.25, 0.05];
+    let gamma = 0.72;
     let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(n, n);
     for (px, py, p) in img.enumerate_pixels_mut() {
-        // image (x=col, y=row) -> field (i=row=y_img, j=col=x_img); flip y for
-        // a conventional upright orientation.
-        let i = (n - 1 - py) as usize;
+        let i = (n - 1 - py) as usize; // flip y for an upright image
         let j = px as usize;
-        let c = dye[[i, j]];
-        let g = c.clamp(0.0, 1.0);
-        let r = (-c).clamp(0.0, 1.0);
+        let g = gold[[i, j]].max(0.0);
+        let r = rust[[i, j]].max(0.0);
         let mut rgb = [0u8; 3];
         for k in 0..3 {
-            let v = (gold[k] * g + rust[k] * r).clamp(0.0, 1.0).powf(gamma);
+            let v = (gcol[k] * g + rcol[k] * r).clamp(0.0, 1.0).powf(gamma);
             rgb[k] = (v * 255.0).round() as u8;
         }
         *p = Rgb(rgb);
