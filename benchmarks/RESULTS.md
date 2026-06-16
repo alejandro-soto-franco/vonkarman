@@ -61,12 +61,42 @@ Notes.
   N=128 (thermal or scheduling); the minimum-of-repeats ratios are similar to the means.
 - Profiling (nsys) shows the resident step at N >= 128 is compute-bound, with the GPU at
   about 99.96 percent utilisation and cuFFT taking about 81 percent of GPU time. The
-  remaining throughput lever is therefore cuFFT (batching the three velocity components
-  into one plan, or precision), not host-side launch overhead. This is noted honestly as
-  future tuning rather than claimed as done.
+  remaining throughput lever is therefore cuFFT throughput, not host-side launch overhead.
+  We tested the obvious candidate, cuFFT batching, directly; see the next section.
 
 Data: `results/timing_vonkarman_3way.csv` (one row per repeat). Figures: `results/figures/`
 (`speed_table.png`, `steps_per_s.png`, `pareto.png`), produced by `pareto.py`.
+
+## cuFFT batching: tested and measured, a negative result
+
+A resident nonlinear evaluation runs nine padded transforms: six inverse (three velocity,
+three vorticity) and three forward. The natural next optimisation is cuFFT batching, fusing
+the three same-shape transforms of each group into one `cufftMakePlanMany` plan so a single
+launch processes all three. We implemented it (`CufftBackend::new_device_only_batched`,
+verified bit-identical to per-component transforms in both directions) and measured the
+transform-only ceiling it could buy, with no pointwise kernels or host transfers in the way:
+
+| N   | nine transforms separate (ms) | as three batched launches (ms) | speedup |
+|-----|-------------------------------|--------------------------------|---------|
+| 64  | 4.61                          | 4.44                           | 1.040x  |
+| 128 | 38.29                         | 37.97                          | 1.008x  |
+| 256 | 342.32                        | 341.72                         | 1.002x  |
+
+This is the most batching could possibly give, and it is small: 4 percent at N=64, falling
+to 0.2 percent at N=256. Because the transforms are about 81 percent of the step, the
+end-to-end step win is bounded above by roughly 3 percent at N=64 and is effectively zero at
+N >= 128. The reason is exactly what the profiling said: a single 3/2-padded transform
+(96^3, 192^3, 384^3) already saturates the RTX 5060, so fusing the launches removes only the
+negligible per-launch overhead, not any real serial bottleneck. Batching also costs memory:
+a three-wide padded complex scratch is about 0.9 GiB at N=256, which would break the
+256^3-in-8 GB result for no speed return.
+
+We therefore measured it, kept the verified batched backend available, and deliberately did
+NOT wire it into the validated step. The honest conclusion is that the resident step is
+cuFFT-throughput-bound and batching the launches does not add throughput here; the real
+levers are algorithmic (precision, or a different dealiasing) rather than launch fusion.
+Reproduce with `cargo +nightly-2026-04-03 test --release -p vonkarman-periodic --features
+cuda batched_vs_separate_transform_timing -- --ignored --nocapture`.
 
 ## Accuracy
 
@@ -117,8 +147,10 @@ reference.
 ## Honest caveats
 
 - Single consumer GPU, 8 GB. No multi-GPU. f64 to 256^3, no double-double yet.
-- The resident step is cuFFT-bound at N >= 128; the speedups above are real and measured,
-  but further gains are available from cuFFT batching, which is not yet done.
+- The resident step is cuFFT-bound at N >= 128. We tested cuFFT batching as the candidate
+  next lever and measured that it buys at most 4 percent (N=64) down to 0.2 percent (N=256)
+  of transform time, so it is not integrated; see the batching section above. Further gains
+  would have to come from algorithmic changes, not launch fusion.
 - The CPU and non-resident baselines use adaptive dt while the resident path uses a fixed
   dt in the timing harness; the per-step work (36 padded transforms) is the same.
 - Reference-solver coverage is partial on this box, as documented.

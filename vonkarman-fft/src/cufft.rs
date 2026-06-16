@@ -71,6 +71,21 @@ struct CudaLibs {
     cufft_create: unsafe extern "C" fn(*mut CufftHandle) -> i32,
     cufft_set_auto_allocation: unsafe extern "C" fn(CufftHandle, i32) -> i32,
     cufft_make_plan_3d: unsafe extern "C" fn(CufftHandle, i32, i32, i32, i32, *mut usize) -> i32,
+    #[allow(clippy::type_complexity)]
+    cufft_make_plan_many: unsafe extern "C" fn(
+        CufftHandle,
+        i32,
+        *mut i32,
+        *mut i32,
+        i32,
+        i32,
+        *mut i32,
+        i32,
+        i32,
+        i32,
+        i32,
+        *mut usize,
+    ) -> i32,
     cufft_set_work_area: unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32,
     cufft_exec_d2z: unsafe extern "C" fn(CufftHandle, *mut f64, *mut [f64; 2]) -> i32,
     cufft_exec_z2d: unsafe extern "C" fn(CufftHandle, *mut [f64; 2], *mut f64) -> i32,
@@ -169,6 +184,26 @@ impl CudaLibs {
                     sym: "cufftMakePlan3d".into(),
                     source: e,
                 })?;
+            #[allow(clippy::type_complexity)]
+            let cufft_make_plan_many = *cufft_lib
+                .get::<unsafe extern "C" fn(
+                    CufftHandle,
+                    i32,
+                    *mut i32,
+                    *mut i32,
+                    i32,
+                    i32,
+                    *mut i32,
+                    i32,
+                    i32,
+                    i32,
+                    i32,
+                    *mut usize,
+                ) -> i32>(b"cufftMakePlanMany\0")
+                .map_err(|e| CufftError::SymbolLoad {
+                    sym: "cufftMakePlanMany".into(),
+                    source: e,
+                })?;
             let cufft_set_work_area = *cufft_lib
                 .get::<unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32>(b"cufftSetWorkArea\0")
                 .map_err(|e| CufftError::SymbolLoad {
@@ -192,6 +227,7 @@ impl CudaLibs {
                 cufft_create,
                 cufft_set_auto_allocation,
                 cufft_make_plan_3d,
+                cufft_make_plan_many,
                 cufft_set_work_area,
                 cufft_exec_d2z,
                 cufft_exec_z2d,
@@ -230,6 +266,12 @@ pub struct CufftBackend {
     /// (`max` of the two plans' required sizes), for the memory budget. Zero for
     /// the host-path constructor.
     shared_work_bytes: usize,
+    /// Number of contiguous transforms each `*_dev` exec processes in one launch.
+    /// `1` for the plain (per-component) constructors; `> 1` for a batched plan
+    /// built by [`Self::new_device_only_batched`], where the device pointers
+    /// passed to `r2c_3d_dev`/`c2r_3d_dev` are the BASE of `batch` tightly-packed
+    /// transforms (each `nx*ny*nz` reals / `nx*ny*(nz/2+1)` complex).
+    batch: usize,
 }
 
 // CufftBackend is Send because the device pointers and plans are only
@@ -294,6 +336,7 @@ impl CufftBackend {
             plan_z2d,
             shared_work_area: ptr::null_mut(),
             shared_work_bytes: 0,
+            batch: 1,
         })
     }
 
@@ -415,7 +458,161 @@ impl CufftBackend {
             plan_z2d,
             shared_work_area: work,
             shared_work_bytes: sz_d2z.max(sz_z2d),
+            batch: 1,
         })
+    }
+
+    /// Creates a DEVICE-ONLY, BATCHED cuFFT backend: one forward (D2Z) and one
+    /// inverse (Z2D) plan, each transforming `batch` tightly-packed 3D arrays per
+    /// exec, the two plans sharing ONE work area.
+    ///
+    /// This is the throughput variant of [`Self::new_device_only`]. Instead of
+    /// one transform per `cufftExec`, the plan does `batch` of them in a single
+    /// launch (via `cufftMakePlanMany` with `inembed`/`onembed` NULL, so the
+    /// arrays are tightly packed at the natural transform distances: `nx*ny*nz`
+    /// reals and `nx*ny*(nz/2+1)` complex between successive transforms). Fusing
+    /// the per-velocity-component transforms into one launch removes per-launch
+    /// overhead and lets cuFFT fill the GPU better for the smaller grids, where
+    /// an individual padded transform does not saturate the device.
+    ///
+    /// The `*_dev` exec methods are unchanged: the caller passes the BASE pointer
+    /// of a contiguous `batch`-wide real buffer (`batch * nx*ny*nz` f64) and a
+    /// contiguous `batch`-wide complex buffer (`batch * nx*ny*(nz/2+1)` complex),
+    /// and cuFFT walks all `batch` transforms from there. As with
+    /// [`Self::new_device_only`], only the `*_dev` entry points are valid (the
+    /// host [`FftBackend`] methods panic), and both plans skip the host-path
+    /// scratch and share a single work area.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `batch == 0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CufftError`] if any cuFFT call or the work-area allocation
+    /// fails.
+    pub fn new_device_only_batched(
+        nx: usize,
+        ny: usize,
+        nz: usize,
+        batch: usize,
+    ) -> Result<Self, CufftError> {
+        assert!(batch > 0, "cuFFT batch count must be positive");
+        let libs = CudaLibs::load()?;
+
+        let mut plan_d2z: CufftHandle = 0;
+        let mut plan_z2d: CufftHandle = 0;
+        let mut sz_d2z: usize = 0;
+        let mut sz_z2d: usize = 0;
+        let mut work: *mut c_void = ptr::null_mut();
+        // cufftMakePlanMany takes the transform dimensions as a mutable C array.
+        let mut dims: [i32; 3] = [nx as i32, ny as i32, nz as i32];
+
+        unsafe {
+            let rc = (libs.cufft_create)(&mut plan_d2z);
+            if rc != 0 {
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_create)(&mut plan_z2d);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_set_auto_allocation)(plan_d2z, 0);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_set_auto_allocation)(plan_z2d, 0);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            // Build both batched plans. inembed/onembed NULL => tightly packed,
+            // stride 1, natural transform distances; istride/idist/ostride/odist
+            // are then ignored, so pass 1/0.
+            let rc = (libs.cufft_make_plan_many)(
+                plan_d2z,
+                3,
+                dims.as_mut_ptr(),
+                ptr::null_mut(),
+                1,
+                0,
+                ptr::null_mut(),
+                1,
+                0,
+                CUFFT_D2Z,
+                batch as i32,
+                &mut sz_d2z,
+            );
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_make_plan_many)(
+                plan_z2d,
+                3,
+                dims.as_mut_ptr(),
+                ptr::null_mut(),
+                1,
+                0,
+                ptr::null_mut(),
+                1,
+                0,
+                CUFFT_Z2D,
+                batch as i32,
+                &mut sz_z2d,
+            );
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let work_bytes = sz_d2z.max(sz_z2d);
+            let rc = (libs.cuda_malloc)(&mut work, work_bytes);
+            if rc != 0 {
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::Alloc { code: rc });
+            }
+            let rc = (libs.cufft_set_work_area)(plan_d2z, work);
+            if rc != 0 {
+                (libs.cuda_free)(work);
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+            let rc = (libs.cufft_set_work_area)(plan_z2d, work);
+            if rc != 0 {
+                (libs.cuda_free)(work);
+                (libs.cufft_destroy)(plan_d2z);
+                (libs.cufft_destroy)(plan_z2d);
+                return Err(CufftError::PlanCreate { code: rc });
+            }
+        }
+
+        Ok(Self {
+            libs,
+            nx,
+            ny,
+            nz,
+            d_real: ptr::null_mut(),
+            d_complex: ptr::null_mut(),
+            plan_d2z,
+            plan_z2d,
+            shared_work_area: work,
+            shared_work_bytes: sz_d2z.max(sz_z2d),
+            batch,
+        })
+    }
+
+    /// Number of contiguous transforms each `*_dev` exec processes (1 unless this
+    /// backend was built by [`Self::new_device_only_batched`]).
+    pub fn batch(&self) -> usize {
+        self.batch
     }
 
     /// Binds both cuFFT plans (forward D2Z and inverse Z2D) to `stream`.
@@ -521,6 +718,11 @@ impl CufftBackend {
     /// touched. The result lands in `d_complex` in cuFFT's native interleaved
     /// `[re, im, ...]` layout, length `nx * ny * (nz/2 + 1)` complex elements.
     ///
+    /// On a batched backend ([`Self::new_device_only_batched`]) `d_real` and
+    /// `d_complex` are the BASE of `batch()` tightly-packed transforms, and this
+    /// single call processes all of them (input distance `nx*ny*nz` reals, output
+    /// distance `nx*ny*(nz/2+1)` complex).
+    ///
     /// # Safety
     ///
     /// - `d_real` must point to a valid device allocation of at least
@@ -544,6 +746,10 @@ impl CufftBackend {
     /// Runs `cufftExecZ2D(plan_z2d, d_complex, d_real)` against the resident
     /// pointers; `self.d_real`/`self.d_complex` are not touched. The result
     /// lands in `d_real`, length `nx * ny * nz` reals.
+    ///
+    /// On a batched backend ([`Self::new_device_only_batched`]) `d_complex` and
+    /// `d_real` are the BASE of `batch()` tightly-packed transforms, and this
+    /// single call processes all of them.
     ///
     /// CRITICAL: unlike the host [`FftBackend::c2r_3d`] path, this leaves the
     /// output UNNORMALISED. cuFFT's inverse transform is unscaled, so the caller

@@ -1336,4 +1336,238 @@ mod tests {
             );
         }
     }
+
+    /// A batched cuFFT plan (one exec doing 3 contiguous transforms) must produce
+    /// the SAME spectrum as three separate single-transform execs, to machine
+    /// precision, in both directions. This is the correctness gate for
+    /// [`CufftBackend::new_device_only_batched`] before it is used in the step.
+    #[test]
+    fn batched_cufft_matches_per_component() {
+        use std::f64::consts::PI;
+
+        let Some(backend) = backend_or_skip() else {
+            return;
+        };
+
+        // Use the 3/2-padded grid of N = 32 (= 48^3), the shape the resident
+        // solver's padded transforms actually run on.
+        let g = GridSpec::cubic(32, 2.0 * PI).padded_3half();
+        let (nx, ny, nz) = (g.nx, g.ny, g.nz);
+        let real_len = nx * ny * nz;
+        let cplx_len = nx * ny * (nz / 2 + 1);
+        let batch = 3usize;
+
+        // Deterministic real input across three contiguous components.
+        let host_real: Vec<f64> = (0..batch * real_len)
+            .map(|i| ((i as f64) * 0.0009).sin() * 1.7 - 0.3)
+            .collect();
+        let real_b = backend.upload_real::<f64>(&host_real);
+        let cplx_b = backend.alloc_cplx::<f64>(batch * cplx_len);
+
+        let batched = CufftBackend::new_device_only_batched(nx, ny, nz, batch)
+            .expect("batched plan creation failed");
+        batched
+            .set_stream(backend.stream_raw())
+            .expect("batched set_stream failed");
+        let single =
+            CufftBackend::new_device_only(nx, ny, nz).expect("single plan creation failed");
+        single
+            .set_stream(backend.stream_raw())
+            .expect("single set_stream failed");
+
+        // Batched forward: the base pointers process all three transforms at the
+        // natural tightly-packed distances.
+        let rbase = backend.real_device_ptr(&real_b);
+        let cbase = backend.cplx_device_ptr(&cplx_b);
+        // SAFETY: rbase/cbase are bases of resident buffers of batch*real_len and
+        // batch*cplx_len in the active context; the batched plan matches
+        // (nx,ny,nz) with batch=3; bound to the backend stream; buffers outlive.
+        unsafe {
+            batched.r2c_3d_dev(rbase, cbase);
+        }
+        let mut batched_host = vec![Complex::new(0.0_f64, 0.0); batch * cplx_len];
+        backend.download_cplx::<f64>(&cplx_b, &mut batched_host);
+
+        // Per-component reference forward from the matching offset of the input.
+        let mut max_rel_fwd = 0.0_f64;
+        for c in 0..batch {
+            let single_c = backend.alloc_cplx::<f64>(cplx_len);
+            // SAFETY: offset within the batch*real_len real buffer; valid f64 ptr.
+            let r_off = unsafe { rbase.add(c * real_len) };
+            let c_single = backend.cplx_device_ptr(&single_c);
+            // SAFETY: single plan matches (nx,ny,nz); r_off is the c-th transform
+            // input (real_len reals), c_single a fresh cplx_len complex buffer.
+            unsafe {
+                single.r2c_3d_dev(r_off, c_single);
+            }
+            let mut single_host = vec![Complex::new(0.0_f64, 0.0); cplx_len];
+            backend.download_cplx::<f64>(&single_c, &mut single_host);
+            let slice = &batched_host[c * cplx_len..(c + 1) * cplx_len];
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for (b, s) in slice.iter().zip(single_host.iter()) {
+                let d = (b - s).norm();
+                num += d * d;
+                den += s.norm_sqr();
+            }
+            max_rel_fwd = max_rel_fwd.max((num / den.max(f64::MIN_POSITIVE)).sqrt());
+        }
+        eprintln!("batched r2c vs per-component: max relative l2 = {max_rel_fwd:e}");
+        assert!(
+            max_rel_fwd < 1e-12,
+            "batched r2c differs from per-component: {max_rel_fwd:e}"
+        );
+
+        // Inverse: upload pristine copies (Z2D may clobber its input) and compare
+        // the batched c2r against three single c2r execs.
+        let mut inv_in_batched = backend.alloc_cplx::<f64>(batch * cplx_len);
+        backend.upload_cplx::<f64>(&batched_host, &mut inv_in_batched);
+        let real_out = backend.alloc_real::<f64>(batch * real_len);
+        let cin = backend.cplx_device_ptr(&inv_in_batched);
+        let rout = backend.real_device_ptr(&real_out);
+        // SAFETY: batched plan; cin is batch*cplx_len complex, rout batch*real_len
+        // reals, both resident in the active context, bound to the stream.
+        unsafe {
+            batched.c2r_3d_dev(cin, rout);
+        }
+        let batched_real = backend.download_real::<f64>(&real_out);
+
+        let mut max_rel_inv = 0.0_f64;
+        for c in 0..batch {
+            let mut inv_in_c = backend.alloc_cplx::<f64>(cplx_len);
+            backend.upload_cplx::<f64>(
+                &batched_host[c * cplx_len..(c + 1) * cplx_len],
+                &mut inv_in_c,
+            );
+            let single_r = backend.alloc_real::<f64>(real_len);
+            let cin_c = backend.cplx_device_ptr(&inv_in_c);
+            let rout_c = backend.real_device_ptr(&single_r);
+            // SAFETY: single plan; cin_c is cplx_len complex, rout_c real_len reals.
+            unsafe {
+                single.c2r_3d_dev(cin_c, rout_c);
+            }
+            let single_real = backend.download_real::<f64>(&single_r);
+            let slice = &batched_real[c * real_len..(c + 1) * real_len];
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for (b, s) in slice.iter().zip(single_real.iter()) {
+                let d = b - s;
+                num += d * d;
+                den += s * s;
+            }
+            max_rel_inv = max_rel_inv.max((num / den.max(f64::MIN_POSITIVE)).sqrt());
+        }
+        eprintln!("batched c2r vs per-component: max relative l2 = {max_rel_inv:e}");
+        assert!(
+            max_rel_inv < 1e-12,
+            "batched c2r differs from per-component: {max_rel_inv:e}"
+        );
+    }
+
+    /// Transform-only ceiling on the batching win (ignored; run with `--ignored
+    /// --nocapture`).
+    ///
+    /// One resident nonlinear evaluation runs nine padded transforms: six inverse
+    /// (three velocity, three vorticity) and three forward. This harness times
+    /// that exact bundle two ways at N = 64/128/256 on the 3/2-padded grid:
+    ///
+    /// - separate: nine single-transform execs (the current resident path), and
+    /// - batched: two batched inverse execs (batch = 3) plus one batched forward
+    ///   exec (batch = 3), the same nine transforms fused into three launches.
+    ///
+    /// It measures ONLY the cuFFT cost (no pointwise kernels, no host transfers),
+    /// so it bounds the most batching could buy before any solver refactor. The
+    /// numbers are reported exactly as measured in a `BATCHTIMING,`/`BATCHSUMMARY,`
+    /// CSV line. The profiling prior is that the GPU is already near-saturated at
+    /// N >= 128, so the win should concentrate at the smaller grids; this test
+    /// makes that quantitative.
+    #[test]
+    #[ignore = "GPU transform microbenchmark; run with --ignored --nocapture"]
+    fn batched_vs_separate_transform_timing() {
+        use std::f64::consts::PI;
+
+        // (N, warmup bundles, timed bundles): heavier grids do fewer bundles.
+        let configs = [(64usize, 5usize, 200usize), (128, 5, 80), (256, 3, 20)];
+        for &(n, warmup, iters) in &configs {
+            let Some(backend) = backend_or_skip() else {
+                return;
+            };
+            let g = GridSpec::cubic(n, 2.0 * PI).padded_3half();
+            let (nx, ny, nz) = (g.nx, g.ny, g.nz);
+            let real_len = nx * ny * nz;
+            let cplx_len = nx * ny * (nz / 2 + 1);
+
+            // One single-transform scratch pair (the separate path reuses it, as
+            // the solver reuses its single padded scratch) and one 3-wide pair
+            // for the batched path.
+            let cplx1 = backend.alloc_cplx::<f64>(cplx_len);
+            let real1 = backend.alloc_real::<f64>(real_len);
+            let cplx3 = backend.alloc_cplx::<f64>(3 * cplx_len);
+            let real3 = backend.alloc_real::<f64>(3 * real_len);
+
+            let single =
+                CufftBackend::new_device_only(nx, ny, nz).expect("single plan creation failed");
+            single
+                .set_stream(backend.stream_raw())
+                .expect("single set_stream failed");
+            let batched = CufftBackend::new_device_only_batched(nx, ny, nz, 3)
+                .expect("batched plan creation failed");
+            batched
+                .set_stream(backend.stream_raw())
+                .expect("batched set_stream failed");
+
+            let c1 = backend.cplx_device_ptr(&cplx1);
+            let r1 = backend.real_device_ptr(&real1);
+            let c3 = backend.cplx_device_ptr(&cplx3);
+            let r3 = backend.real_device_ptr(&real3);
+            let stream = backend.context().default_stream();
+
+            // One "bundle" = the nine transforms of a nonlinear evaluation.
+            // SAFETY (both closures): all pointers are bases of resident buffers
+            // sized for the plan in the active context, bound to the backend
+            // stream; the transforms are timed, not read for correctness, so the
+            // repeated reuse of the scratch is sound.
+            let separate_bundle = || unsafe {
+                for _ in 0..6 {
+                    single.c2r_3d_dev(c1, r1);
+                }
+                for _ in 0..3 {
+                    single.r2c_3d_dev(r1, c1);
+                }
+            };
+            let batched_bundle = || unsafe {
+                // two inverse batches (velocity, vorticity) + one forward batch
+                batched.c2r_3d_dev(c3, r3);
+                batched.c2r_3d_dev(c3, r3);
+                batched.r2c_3d_dev(r3, c3);
+            };
+
+            for _ in 0..warmup {
+                separate_bundle();
+                batched_bundle();
+            }
+            stream.synchronize().expect("sync after warmup failed");
+
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                separate_bundle();
+            }
+            stream.synchronize().expect("sync after separate failed");
+            let sep_ms = 1.0e3 * t0.elapsed().as_secs_f64() / iters as f64;
+
+            let t1 = std::time::Instant::now();
+            for _ in 0..iters {
+                batched_bundle();
+            }
+            stream.synchronize().expect("sync after batched failed");
+            let bat_ms = 1.0e3 * t1.elapsed().as_secs_f64() / iters as f64;
+
+            eprintln!("BATCHTIMING,{n},separate,{sep_ms:.4}");
+            eprintln!("BATCHTIMING,{n},batched,{bat_ms:.4}");
+            eprintln!(
+                "BATCHSUMMARY,{n},separate={sep_ms:.4},batched={bat_ms:.4},speedup={:.3}",
+                sep_ms / bat_ms
+            );
+        }
+    }
 }
