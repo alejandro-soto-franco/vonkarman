@@ -124,6 +124,11 @@ pub struct ResidentSolver {
     /// ETD intermediate state `temp[3]` on the `N` grid.
     temp: [CplxBuf<f64>; 3],
 
+    /// One N-grid complex scratch (length `cplx_len`) used only by the resident
+    /// CFL path: `u_hat[c]` is copied here before the destructive cuFFT C2R so
+    /// the primary state survives. Small (one N-grid complex buffer).
+    cfl_scratch: CplxBuf<f64>,
+
     /// Per-mode ETD coefficient buffers (flat length `cplx_len`), recomputed on
     /// the host and re-uploaded only when `dt` changes.
     etd_exp_full: RealBuf<f64>,
@@ -257,6 +262,7 @@ impl ResidentSolver {
             alloc_cplx3(&backend, cplx_len),
         ];
         let temp = alloc_cplx3(&backend, cplx_len);
+        let cfl_scratch = backend.alloc_cplx::<f64>(cplx_len);
 
         // ETD coefficient buffers: allocated now, filled by ensure_etd later.
         let etd_exp_full = backend.alloc_real::<f64>(cplx_len);
@@ -289,6 +295,7 @@ impl ResidentSolver {
             omega_phys,
             stage_n,
             temp,
+            cfl_scratch,
             etd_exp_full,
             etd_exp_half,
             etd_a21,
@@ -336,7 +343,8 @@ impl ResidentSolver {
     /// analytic estimate against the ACTUAL `cudaMemGetInfo` peak.
     pub fn peak_memory_bytes(&self) -> usize {
         let f64_bytes = std::mem::size_of::<f64>();
-        let cplx_n_buffers = 21; // u_hat + omega_hat + 4 stage triples + temp
+        // u_hat(3) + omega_hat(3) + 4 stage triples(12) + temp(3) + cfl_scratch(1)
+        let cplx_n_buffers = 22;
         let n_complex = cplx_n_buffers * 2 * self.cplx_len;
         let padded_complex = 2 * self.pcplx_len; // one padded complex scratch
         let padded_real = 6 * self.preal_len; // u_phys + omega_phys (cross in place)
@@ -722,6 +730,73 @@ impl ResidentSolver {
                 .expect("ResidentSolver: final update failed");
         }
     }
+
+    /// Resident CFL timestep, reproducing the CPU `compute_cfl_dt_static` scheme
+    /// WITHOUT a per-step host pull of the velocity field.
+    ///
+    /// The CPU reference computes `dt = safety * min(dx / max||u||, dx^2 / nu,
+    /// 0.1)` from the N-grid physical velocity. This does the same on device:
+    /// for each component it copies `u_hat[c]` into the CFL scratch (the cuFFT
+    /// C2R may overwrite its input, so the primary state must be protected),
+    /// inverse-transforms the scratch into the FRONT `real_len` reals of the
+    /// padded `u_phys[c]` buffer with the N-grid plan, and applies the deferred
+    /// `1 / real_len` cuFFT normalisation. A device max-reduction over those
+    /// `real_len` points then yields `max||u||^2` with NO host transfer of the
+    /// field (only the tiny <=256-partial tail of the reduction is pulled, as in
+    /// `sum_norm_sq`). The step therefore stays resident.
+    ///
+    /// `safety` and `nu` match the CPU solver (`cfl_safety = 0.5`).
+    pub fn cfl_dt(&mut self, safety: f64, nu: f64) -> f64 {
+        let inv_n = 1.0 / (self.real_len as f64);
+        for c in 0..3 {
+            // Snapshot u_hat[c] into the CFL scratch (C2R is destructive).
+            self.backend
+                .copy_cplx::<f64>(&self.u_hat[c], &mut self.cfl_scratch)
+                .expect("ResidentSolver: CFL copy failed");
+            // Inverse transform (N-grid plan) scratch -> front real_len of u_phys[c].
+            let d_cplx = self.backend.cplx_device_ptr(&self.cfl_scratch);
+            let d_real = self.backend.real_device_ptr(&self.u_phys[c]);
+            // SAFETY: both pointers come from resident buffers in the active
+            // context; the N-grid plan matches (nx, ny, nz); cfl_scratch is
+            // 2*cplx_len f64 and u_phys[c] is preal_len >= real_len f64 (the
+            // N-grid inverse writes exactly real_len reals into the front); the
+            // plan is bound to the backend stream; buffers outlive the call.
+            unsafe {
+                self.fft.c2r_3d_dev(d_cplx, d_real);
+            }
+            // The cuFFT inverse is unnormalised; the deferred 1/N is folded into
+            // the squared-speed result below (scaling each real by 1/N scales the
+            // squared speed by 1/N^2, and a positive scale commutes with max).
+        }
+        // Find max||u||^2 over the unnormalised front real_len reals of u_phys,
+        // then apply the (1/N)^2 normalisation to the squared speed.
+        let [u0, u1, u2] = &self.u_phys;
+        let max_sq_unnorm = self.backend.max_speed_sq::<f64>(u0, u1, u2, self.real_len);
+        let u_max = (max_sq_unnorm * inv_n * inv_n).sqrt();
+
+        let dx = self.grid.dx();
+        let advective = if u_max > 1e-30 { dx / u_max } else { 1.0 };
+        let viscous = if nu > 1e-30 {
+            dx * dx / nu
+        } else {
+            f64::INFINITY
+        };
+        safety * advective.min(viscous).min(0.1)
+    }
+
+    /// Current viscosity the solver was built with.
+    pub fn nu(&self) -> f64 {
+        self.nu
+    }
+
+    /// Downloads all three spectral velocity components into `host[0..3]`
+    /// (diagnostics; three transfers). Each slice must be `cplx_len` long.
+    pub fn download_u_hat_all(&self, host: &mut [Vec<Complex<f64>>; 3]) {
+        for c in 0..3 {
+            self.backend
+                .download_cplx::<f64>(&self.u_hat[c], &mut host[c]);
+        }
+    }
 }
 
 /// Which physical field a pad/inverse step targets.
@@ -871,7 +946,7 @@ mod tests {
             let pcplx = pg.nx * pg.ny * (pg.nz / 2 + 1);
             let preal = pg.nx * pg.ny * pg.nz;
             let bytes =
-                (21 * 2 * cplx + 2 * pcplx + 6 * preal + 11 * cplx) * std::mem::size_of::<f64>();
+                (22 * 2 * cplx + 2 * pcplx + 6 * preal + 11 * cplx) * std::mem::size_of::<f64>();
             eprintln!(
                 "resident buffer-only estimate at N={nn}: {:.3} GiB (excl. cuFFT work areas)",
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)

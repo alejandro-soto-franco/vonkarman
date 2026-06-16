@@ -1025,6 +1025,191 @@ impl CudaBackend {
         sum
     }
 
+    /// Device-to-device copy `dst = src` of an interleaved-complex buffer.
+    ///
+    /// Loads the `copy_cplx` kernel and launches it on the default stream, then
+    /// synchronises. Both buffers are interleaved complex of the same logical
+    /// length. Used by the resident CFL path to snapshot `u_hat[c]` before the
+    /// destructive cuFFT C2R inverse, preserving the primary state.
+    pub fn copy_cplx<F: Float>(
+        &self,
+        src: &CplxBuf<F>,
+        dst: &mut CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let len = src.buf.len();
+        debug_assert_eq!(dst.buf.len(), len, "copy_cplx: src and dst length mismatch");
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("copy_cplx")?;
+
+        let mut p_src = src.buf.cu_deviceptr();
+        let mut l_src = len as u64;
+        let mut p_dst = dst.buf.cu_deviceptr();
+        let mut l_dst = len as u64;
+        let mut params: [*mut std::ffi::c_void; 4] = [
+            &mut p_src as *mut _ as *mut std::ffi::c_void,
+            &mut l_src as *mut _ as *mut std::ffi::c_void,
+            &mut p_dst as *mut _ as *mut std::ffi::c_void,
+            &mut l_dst as *mut _ as *mut std::ffi::c_void,
+        ];
+        let cfg = LaunchConfig::for_num_elems(len as u32);
+        // SAFETY: `func` from a module on `self.ctx`; same-context stream; the 4
+        // params alias the live (ptr, len) pairs the PTX expects; grid sized for
+        // `2 n` f64 elements, kernel bounds-checks `i < len`. Params outlive the
+        // call (synchronise below). src and dst are distinct buffers.
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
+    /// On-device maximum of the squared speed `ux^2 + uy^2 + uz^2` over three
+    /// resident real physical velocity buffers, for the CFL timestep.
+    ///
+    /// Mirrors the host CFL `u_max` scan but stays resident: `speed_sq_map`
+    /// writes the per-point squared speed, then `pairwise_max` halves the length
+    /// each pass until at most `TAIL` partials remain; only that small tail is
+    /// pulled back and finished with a host max. Returns `max||u||^2` as `f64`
+    /// (the caller takes the square root for `||u||_inf`).
+    ///
+    /// Only the LEADING `n` real points of each buffer are reduced, so the
+    /// resident solver can pass its padded `u_phys` buffers (length `preal_len`)
+    /// with `n = real_len`: the N-grid inverse FFT writes the N-grid physical
+    /// velocity into the front `real_len` entries, and the CFL max must scan
+    /// exactly those (the tail is stale padding). All three buffers must hold at
+    /// least `n` reals.
+    pub fn max_speed_sq<F: Float>(
+        &self,
+        ux: &RealBuf<F>,
+        uy: &RealBuf<F>,
+        uz: &RealBuf<F>,
+        n: usize,
+    ) -> f64 {
+        assert_f64::<F>();
+        const TAIL: usize = 256;
+        debug_assert!(
+            ux.buf.len() >= n && uy.buf.len() >= n && uz.buf.len() >= n,
+            "max_speed_sq: all three velocity buffers must hold at least n reals"
+        );
+        if n == 0 {
+            return 0.0;
+        }
+
+        let stream = self.ctx.default_stream();
+        let module = self
+            .ctx
+            .load_module_from_ptx_src(ptx::KERNELS)
+            .expect("max_speed_sq: module load failed");
+
+        // Step 1: map ux^2 + uy^2 + uz^2 into a real device buffer of length n.
+        let mut cur =
+            DeviceBuffer::<f64>::zeroed(&stream, n).expect("max_speed_sq: map buffer alloc failed");
+        {
+            let func = module
+                .load_function("speed_sq_map")
+                .expect("max_speed_sq: speed_sq_map not found");
+            let mut p_ux = ux.buf.cu_deviceptr();
+            let mut l_ux = n as u64;
+            let mut p_uy = uy.buf.cu_deviceptr();
+            let mut l_uy = n as u64;
+            let mut p_uz = uz.buf.cu_deviceptr();
+            let mut l_uz = n as u64;
+            let mut p_out = cur.cu_deviceptr();
+            let mut l_out = n as u64;
+            let mut params: [*mut std::ffi::c_void; 8] = [
+                &mut p_ux as *mut _ as *mut std::ffi::c_void,
+                &mut l_ux as *mut _ as *mut std::ffi::c_void,
+                &mut p_uy as *mut _ as *mut std::ffi::c_void,
+                &mut l_uy as *mut _ as *mut std::ffi::c_void,
+                &mut p_uz as *mut _ as *mut std::ffi::c_void,
+                &mut l_uz as *mut _ as *mut std::ffi::c_void,
+                &mut p_out as *mut _ as *mut std::ffi::c_void,
+                &mut l_out as *mut _ as *mut std::ffi::c_void,
+            ];
+            let cfg = LaunchConfig::for_num_elems(n as u32);
+            // SAFETY: `func` from a module on `self.ctx`; the stream belongs to
+            // the same context; the 8 params alias the live (ptr, len) pairs the
+            // PTX expects; the grid is sized for `n` points and the kernel
+            // bounds-checks `i < n`. Params outlive the launch (sync below).
+            unsafe {
+                launch_kernel_on_stream(
+                    &func,
+                    cfg.grid_dim,
+                    cfg.block_dim,
+                    cfg.shared_mem_bytes,
+                    &stream,
+                    &mut params,
+                )
+                .expect("max_speed_sq: speed_sq_map launch failed");
+            }
+            stream.synchronize().expect("max_speed_sq: map sync failed");
+        }
+
+        // Step 2: pairwise tree MAX, halving the length each pass.
+        let reduce = module
+            .load_function("pairwise_max")
+            .expect("max_speed_sq: pairwise_max not found");
+        let mut cur_len = n;
+        while cur_len > TAIL {
+            let out_len = cur_len.div_ceil(2);
+            let next = DeviceBuffer::<f64>::zeroed(&stream, out_len)
+                .expect("max_speed_sq: reduce buffer alloc failed");
+            let mut p_in = cur.cu_deviceptr();
+            let mut l_in = cur_len as u64;
+            let mut v_in_len = cur_len as u64;
+            let mut p_out = next.cu_deviceptr();
+            let mut l_out = out_len as u64;
+            let mut params: [*mut std::ffi::c_void; 5] = [
+                &mut p_in as *mut _ as *mut std::ffi::c_void,
+                &mut l_in as *mut _ as *mut std::ffi::c_void,
+                &mut v_in_len as *mut _ as *mut std::ffi::c_void,
+                &mut p_out as *mut _ as *mut std::ffi::c_void,
+                &mut l_out as *mut _ as *mut std::ffi::c_void,
+            ];
+            let cfg = LaunchConfig::for_num_elems(out_len as u32);
+            // SAFETY: as for sum_norm_sq_device's reduce; 5 params with the
+            // `in_len` scalar between the two (ptr, len) pairs; grid sized for
+            // `out_len`; kernel bounds-checks `i < out_len`. `cur`/`next` distinct.
+            unsafe {
+                launch_kernel_on_stream(
+                    &reduce,
+                    cfg.grid_dim,
+                    cfg.block_dim,
+                    cfg.shared_mem_bytes,
+                    &stream,
+                    &mut params,
+                )
+                .expect("max_speed_sq: pairwise_max launch failed");
+            }
+            stream
+                .synchronize()
+                .expect("max_speed_sq: reduce sync failed");
+            cur = next;
+            cur_len = out_len;
+        }
+
+        // Step 3: download the small tail and finish with a host max.
+        let tail = cur
+            .to_host_vec(&stream)
+            .expect("max_speed_sq: tail download failed");
+        let mut m = 0.0_f64;
+        for &term in tail.iter().take(cur_len) {
+            if term > m {
+                m = term;
+            }
+        }
+        m
+    }
+
     /// Spectral zero-pad scatter for 3/2 dealiasing, over resident device
     /// buffers (pure index remap, no scaling).
     ///

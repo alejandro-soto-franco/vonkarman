@@ -407,6 +407,87 @@ mod kernels {
         }
     }
 
+    /// Element-wise copy of an interleaved-complex buffer: `dst = src`.
+    ///
+    /// A pure data move (length `2 n` f64, one thread per f64 element), used by
+    /// the resident CFL path to snapshot `u_hat[c]` into a scratch buffer before
+    /// the destructive cuFFT C2R inverse, so the primary state is preserved.
+    /// Bit-identical to the source (no arithmetic).
+    #[kernel]
+    pub fn copy_cplx(src: &[f64], mut dst: DisjointSlice<f64>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < dst.len() {
+            // SAFETY: `i < dst.len()` checked; `src` shares that length; `i` is a
+            // thread-unique index, so no two threads write the same slot.
+            unsafe {
+                *dst.get_unchecked_mut(i) = src[i];
+            }
+        }
+    }
+
+    /// Per-point squared speed map for the CFL timestep:
+    /// `out[i] = ux[i]^2 + uy[i]^2 + uz[i]^2`.
+    ///
+    /// Reads the three real physical velocity components (length `n` each) and
+    /// writes the squared speed per grid point, so a following max-reduction
+    /// yields `max||u||^2` on device. One thread per grid point `i`. The two
+    /// trailing products contract into the running sum as `fma.rn.f64`
+    /// (`fma(uz, uz, fma(uy, uy, ux*ux))`); no explicit `mul_add`.
+    #[kernel]
+    pub fn speed_sq_map(
+        ux: &[f64],
+        uy: &[f64],
+        uz: &[f64],
+        mut out: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < out.len() {
+            let x = ux[i];
+            let y = uy[i];
+            let z = uz[i];
+            // SAFETY: `i < out.len()` checked; all inputs share that length; `i`
+            // is a thread-unique index, so no two threads write the same slot.
+            unsafe {
+                *out.get_unchecked_mut(i) = x * x + y * y + z * z;
+            }
+        }
+    }
+
+    /// One pass of a pairwise tree MAX reduction:
+    /// `out[i] = max(in[2 i], in[2 i + 1])`.
+    ///
+    /// The max analogue of [`pairwise_reduce`]: takes the larger of adjacent
+    /// pairs of the real input `inp` (length `in_len`) into `out` (length
+    /// `(in_len + 1) / 2`), carrying an odd final element unchanged. Launching it
+    /// repeatedly, halving the length each pass, reduces the buffer to the global
+    /// maximum (exact, max is associative and commutative under IEEE-754 for the
+    /// non-NaN speeds here). One thread per OUTPUT element `i`.
+    #[kernel]
+    pub fn pairwise_max(inp: &[f64], in_len: u64, mut out: DisjointSlice<f64>) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < out.len() {
+            let n = in_len as usize;
+            let lo = 2 * i;
+            let hi = 2 * i + 1;
+            let a = inp[lo];
+            // The last output element of an odd-length input has no partner.
+            let v = if hi < n {
+                let b = inp[hi];
+                if a >= b { a } else { b }
+            } else {
+                a
+            };
+            // SAFETY: `i < out.len()` checked; `lo < n` for `i < (n+1)/2`; `i` is
+            // a thread-unique index.
+            unsafe {
+                *out.get_unchecked_mut(i) = v;
+            }
+        }
+    }
+
     /// Spectral zero-pad scatter for 3/2 dealiasing (pure index remap).
     ///
     /// Mirrors `vonkarman_compute::ops::pad::zero_pad_inplace` and the host
