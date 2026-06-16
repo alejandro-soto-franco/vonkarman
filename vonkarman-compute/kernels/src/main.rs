@@ -62,6 +62,55 @@ mod kernels {
         }
     }
 
+    /// Aliasing-safe pointwise cross product `c = u x omega`, register-first.
+    ///
+    /// Identical maths to [`cross_product`], but every thread loads ALL SIX
+    /// inputs for its grid point into registers BEFORE writing any output. This
+    /// makes it sound for the outputs `cx`/`cy`/`cz` to ALIAS the omega inputs
+    /// `ox`/`oy`/`oz` (the resident solver passes `cx == ox` etc. to drop the
+    /// three separate cross buffers): once the six reads are in registers, the
+    /// three writes cannot corrupt any still-pending read. Each thread owns a
+    /// unique index `i`, so no two threads touch the same slot.
+    ///
+    /// The arithmetic is bit-identical to [`cross_product`] (same `a*b - c*d`
+    /// form, same FMA contraction); only the read/write ordering differs.
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn cross_product_inplace(
+        ux: &[f64],
+        uy: &[f64],
+        uz: &[f64],
+        ox: &[f64],
+        oy: &[f64],
+        oz: &[f64],
+        mut cx: DisjointSlice<f64>,
+        mut cy: DisjointSlice<f64>,
+        mut cz: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < cx.len() {
+            // Load all six inputs into registers FIRST. After this point the
+            // source reads are complete, so the three writes below may safely
+            // alias the omega input buffers.
+            let uxi = ux[i];
+            let uyi = uy[i];
+            let uzi = uz[i];
+            let oxi = ox[i];
+            let oyi = oy[i];
+            let ozi = oz[i];
+            // SAFETY: `i < cx.len()` checked above; all output slices share that
+            // length; `i` is a thread-unique index minted from hardware special
+            // registers. Outputs may alias `ox`/`oy`/`oz`; the six source reads
+            // are already latched into registers, so no write races a read.
+            unsafe {
+                *cx.get_unchecked_mut(i) = uyi * ozi - uzi * oyi;
+                *cy.get_unchecked_mut(i) = uzi * oxi - uxi * ozi;
+                *cz.get_unchecked_mut(i) = uxi * oyi - uyi * oxi;
+            }
+        }
+    }
+
     /// Spectral curl `omega_hat = i k x u_hat`, pointwise.
     ///
     /// Mirrors `vonkarman_compute::ops::curl::curl_inplace` and

@@ -186,6 +186,93 @@ $L__BB1_2:                              // %bb8
 	ret;
                                         // -- End function
 }
+	// .globl	cross_product_inplace   // -- Begin function cross_product_inplace
+.visible .entry cross_product_inplace(
+	.param .u64 .ptr .align 1 cross_product_inplace_param_0,
+	.param .u64 cross_product_inplace_param_1,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_2,
+	.param .u64 cross_product_inplace_param_3,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_4,
+	.param .u64 cross_product_inplace_param_5,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_6,
+	.param .u64 cross_product_inplace_param_7,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_8,
+	.param .u64 cross_product_inplace_param_9,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_10,
+	.param .u64 cross_product_inplace_param_11,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_12,
+	.param .u64 cross_product_inplace_param_13,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_14,
+	.param .u64 cross_product_inplace_param_15,
+	.param .u64 .ptr .align 1 cross_product_inplace_param_16,
+	.param .u64 cross_product_inplace_param_17
+)                                       // @cross_product_inplace
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<48>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd11, [cross_product_inplace_param_0];
+	cvta.to.global.u64 	%rd1, %rd11;
+	ld.param.b64 	%rd12, [cross_product_inplace_param_2];
+	cvta.to.global.u64 	%rd2, %rd12;
+	ld.param.b64 	%rd13, [cross_product_inplace_param_4];
+	cvta.to.global.u64 	%rd3, %rd13;
+	ld.param.b64 	%rd14, [cross_product_inplace_param_6];
+	cvta.to.global.u64 	%rd4, %rd14;
+	ld.param.b64 	%rd15, [cross_product_inplace_param_8];
+	cvta.to.global.u64 	%rd5, %rd15;
+	ld.param.b64 	%rd16, [cross_product_inplace_param_10];
+	cvta.to.global.u64 	%rd6, %rd16;
+	ld.param.b64 	%rd17, [cross_product_inplace_param_12];
+	cvta.to.global.u64 	%rd7, %rd17;
+	ld.param.b64 	%rd18, [cross_product_inplace_param_14];
+	cvta.to.global.u64 	%rd8, %rd18;
+	ld.param.b64 	%rd19, [cross_product_inplace_param_16];
+	cvta.to.global.u64 	%rd9, %rd19;
+	mov.u32 	%r1, %tid.x;
+	cvt.u64.u32 	%rd20, %r1;
+	mov.u32 	%r2, %ctaid.x;
+	ld.param.b64 	%rd21, [cross_product_inplace_param_13];
+	mov.u32 	%r3, %ntid.x;
+	mul.wide.u32 	%rd22, %r2, %r3;
+	add.s64 	%rd10, %rd22, %rd20;
+	setp.ge.u64 	%p1, %rd10, %rd21;
+	@%p1 bra 	$L__BB2_2;
+// %bb.1:                               // %bb2
+	shl.b64 	%rd23, %rd10, 3;
+	add.s64 	%rd24, %rd1, %rd23;
+	ld.global.b64 	%rd25, [%rd24];
+	add.s64 	%rd26, %rd2, %rd23;
+	ld.global.b64 	%rd27, [%rd26];
+	add.s64 	%rd28, %rd3, %rd23;
+	ld.global.b64 	%rd29, [%rd28];
+	add.s64 	%rd30, %rd4, %rd23;
+	ld.global.b64 	%rd31, [%rd30];
+	add.s64 	%rd32, %rd5, %rd23;
+	ld.global.b64 	%rd33, [%rd32];
+	add.s64 	%rd34, %rd6, %rd23;
+	ld.global.b64 	%rd35, [%rd34];
+	mul.f64 	%rd36, %rd29, %rd33;
+	add.s64 	%rd37, %rd7, %rd23;
+	neg.f64 	%rd38, %rd36;
+	fma.rn.f64 	%rd39, %rd27, %rd35, %rd38;
+	st.global.b64 	[%rd37], %rd39;
+	mul.f64 	%rd40, %rd25, %rd35;
+	add.s64 	%rd41, %rd8, %rd23;
+	neg.f64 	%rd42, %rd40;
+	fma.rn.f64 	%rd43, %rd29, %rd31, %rd42;
+	st.global.b64 	[%rd41], %rd43;
+	mul.f64 	%rd44, %rd27, %rd31;
+	add.s64 	%rd45, %rd9, %rd23;
+	neg.f64 	%rd46, %rd44;
+	fma.rn.f64 	%rd47, %rd25, %rd33, %rd46;
+	st.global.b64 	[%rd45], %rd47;
+$L__BB2_2:                              // %bb10
+	ret;
+                                        // -- End function
+}
 	// .globl	spectral_pad            // -- Begin function spectral_pad
 .visible .entry spectral_pad(
 	.param .u64 .ptr .align 1 spectral_pad_param_0,
@@ -223,37 +310,37 @@ $L__BB1_2:                              // %bb8
 	mul.lo.s64 	%rd4, %rd8, %rd7;
 	mul.lo.s64 	%rd18, %rd4, %rd6;
 	setp.ge.u64 	%p1, %rd3, %rd18;
-	@%p1 bra 	$L__BB2_11;
+	@%p1 bra 	$L__BB3_11;
 // %bb.1:                               // %bb2
 	or.b64 	%rd19, %rd3, %rd8;
 	and.b64 	%rd20, %rd19, -4294967296;
 	setp.ne.b64 	%p2, %rd20, 0;
-	@%p2 bra 	$L__BB2_3;
-	bra.uni 	$L__BB2_2;
-$L__BB2_3:
+	@%p2 bra 	$L__BB3_3;
+	bra.uni 	$L__BB3_2;
+$L__BB3_3:
 	div.u64 	%rd44, %rd3, %rd8;
-	bra.uni 	$L__BB2_4;
-$L__BB2_2:
+	bra.uni 	$L__BB3_4;
+$L__BB3_2:
 	cvt.u32.u64 	%r4, %rd8;
 	cvt.u32.u64 	%r5, %rd3;
 	div.u32 	%r6, %r5, %r4;
 	cvt.u64.u32 	%rd44, %r6;
-$L__BB2_4:
+$L__BB3_4:
 	mul.lo.s64 	%rd21, %rd44, %rd8;
 	or.b64 	%rd22, %rd44, %rd7;
 	and.b64 	%rd23, %rd22, -4294967296;
 	setp.ne.b64 	%p3, %rd23, 0;
-	@%p3 bra 	$L__BB2_6;
-	bra.uni 	$L__BB2_5;
-$L__BB2_6:
+	@%p3 bra 	$L__BB3_6;
+	bra.uni 	$L__BB3_5;
+$L__BB3_6:
 	rem.u64 	%rd45, %rd44, %rd7;
-	bra.uni 	$L__BB2_7;
-$L__BB2_5:
+	bra.uni 	$L__BB3_7;
+$L__BB3_5:
 	cvt.u32.u64 	%r7, %rd7;
 	cvt.u32.u64 	%r8, %rd44;
 	rem.u32 	%r9, %r8, %r7;
 	cvt.u64.u32 	%rd45, %r9;
-$L__BB2_7:
+$L__BB3_7:
 	ld.param.b64 	%rd13, [spectral_pad_param_9];
 	ld.param.b64 	%rd12, [spectral_pad_param_8];
 	ld.param.b64 	%rd11, [spectral_pad_param_7];
@@ -263,17 +350,17 @@ $L__BB2_7:
 	or.b64 	%rd24, %rd3, %rd4;
 	and.b64 	%rd25, %rd24, -4294967296;
 	setp.ne.b64 	%p4, %rd25, 0;
-	@%p4 bra 	$L__BB2_9;
-	bra.uni 	$L__BB2_8;
-$L__BB2_9:
+	@%p4 bra 	$L__BB3_9;
+	bra.uni 	$L__BB3_8;
+$L__BB3_9:
 	div.u64 	%rd46, %rd3, %rd4;
-	bra.uni 	$L__BB2_10;
-$L__BB2_8:
+	bra.uni 	$L__BB3_10;
+$L__BB3_8:
 	cvt.u32.u64 	%r10, %rd4;
 	cvt.u32.u64 	%r11, %rd3;
 	div.u32 	%r12, %r11, %r10;
 	cvt.u64.u32 	%rd46, %r12;
-$L__BB2_10:
+$L__BB3_10:
 	shr.u64 	%rd26, %rd11, 1;
 	setp.lt.u64 	%p5, %rd46, %rd26;
 	sub.s64 	%rd27, %rd13, %rd6;
@@ -296,7 +383,7 @@ $L__BB2_10:
 	st.global.b64 	[%rd42], %rd40;
 	ld.global.b64 	%rd43, [%rd39+8];
 	st.global.b64 	[%rd42+8], %rd43;
-$L__BB2_11:                             // %bb14
+$L__BB3_11:                             // %bb14
 	ret;
                                         // -- End function
 }
@@ -342,7 +429,7 @@ $L__BB2_11:                             // %bb14
 	mul.wide.u32 	%rd17, %r2, %r3;
 	add.s64 	%rd7, %rd17, %rd16;
 	setp.ge.u64 	%p1, %rd7, %rd10;
-	@%p1 bra 	$L__BB3_2;
+	@%p1 bra 	$L__BB4_2;
 // %bb.1:                               // %bb2
 	ld.param.b64 	%rd8, [etd_stage4_param_4];
 	shl.b64 	%rd18, %rd7, 3;
@@ -372,7 +459,7 @@ $L__BB2_11:                             // %bb14
 	mul.f64 	%rd41, %rd20, %rd40;
 	fma.rn.f64 	%rd42, %rd23, %rd34, %rd41;
 	st.global.b64 	[%rd38+8], %rd42;
-$L__BB3_2:                              // %bb10
+$L__BB4_2:                              // %bb10
 	ret;
                                         // -- End function
 }
@@ -398,7 +485,7 @@ $L__BB3_2:                              // %bb10
 	mul.wide.u32 	%rd7, %r2, %r3;
 	add.s64 	%rd8, %rd7, %rd6;
 	setp.ge.u64 	%p1, %rd8, %rd5;
-	@%p1 bra 	$L__BB4_2;
+	@%p1 bra 	$L__BB5_2;
 // %bb.1:                               // %bb2
 	ld.param.b64 	%rd2, [scale_cplx_param_2];
 	shl.b64 	%rd9, %rd8, 3;
@@ -406,7 +493,7 @@ $L__BB3_2:                              // %bb10
 	ld.global.b64 	%rd10, [%rd1];
 	mul.f64 	%rd11, %rd2, %rd10;
 	st.global.b64 	[%rd1], %rd11;
-$L__BB4_2:                              // %bb4
+$L__BB5_2:                              // %bb4
 	ret;
                                         // -- End function
 }
@@ -435,7 +522,7 @@ $L__BB4_2:                              // %bb4
 	mul.wide.u32 	%rd8, %r2, %r3;
 	add.s64 	%rd3, %rd8, %rd7;
 	setp.ge.u64 	%p1, %rd3, %rd6;
-	@%p1 bra 	$L__BB5_2;
+	@%p1 bra 	$L__BB6_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd9, %rd3, 4;
 	add.s64 	%rd10, %rd1, %rd9;
@@ -446,7 +533,7 @@ $L__BB4_2:                              // %bb4
 	add.s64 	%rd15, %rd2, %rd14;
 	fma.rn.f64 	%rd16, %rd11, %rd11, %rd13;
 	st.global.b64 	[%rd15], %rd16;
-$L__BB5_2:                              // %bb6
+$L__BB6_2:                              // %bb6
 	ret;
                                         // -- End function
 }
@@ -503,7 +590,7 @@ $L__BB5_2:                              // %bb6
 	mul.wide.u32 	%rd22, %r2, %r3;
 	add.s64 	%rd10, %rd22, %rd21;
 	setp.ge.u64 	%p1, %rd10, %rd18;
-	@%p1 bra 	$L__BB6_2;
+	@%p1 bra 	$L__BB7_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd23, %rd10, 3;
 	add.s64 	%rd24, %rd1, %rd23;
@@ -552,7 +639,7 @@ $L__BB5_2:                              // %bb6
 	neg.f64 	%rd62, %rd61;
 	fma.rn.f64 	%rd63, %rd25, %rd35, %rd62;
 	st.global.b64 	[%rd59+8], %rd63;
-$L__BB6_2:                              // %bb11
+$L__BB7_2:                              // %bb11
 	ret;
                                         // -- End function
 }
@@ -582,29 +669,29 @@ $L__BB6_2:                              // %bb11
 	mul.wide.u32 	%rd10, %r2, %r3;
 	add.s64 	%rd3, %rd10, %rd8;
 	setp.ge.u64 	%p1, %rd3, %rd9;
-	@%p1 bra 	$L__BB7_5;
+	@%p1 bra 	$L__BB8_5;
 // %bb.1:                               // %bb2
 	ld.param.b64 	%rd5, [pairwise_reduce_param_2];
 	shl.b64 	%rd4, %rd3, 1;
 	or.b64 	%rd11, %rd4, 1;
 	setp.ge.u64 	%p2, %rd11, %rd5;
-	@%p2 bra 	$L__BB7_3;
+	@%p2 bra 	$L__BB8_3;
 // %bb.2:                               // %bb3
 	shl.b64 	%rd14, %rd4, 3;
 	add.s64 	%rd15, %rd1, %rd14;
 	ld.global.b64 	%rd16, [%rd15];
 	ld.global.b64 	%rd17, [%rd15+8];
 	add.f64 	%rd20, %rd16, %rd17;
-	bra.uni 	$L__BB7_4;
-$L__BB7_3:                              // %bb6
+	bra.uni 	$L__BB8_4;
+$L__BB8_3:                              // %bb6
 	shl.b64 	%rd12, %rd4, 3;
 	add.s64 	%rd13, %rd1, %rd12;
 	ld.global.b64 	%rd20, [%rd13];
-$L__BB7_4:                              // %bb8
+$L__BB8_4:                              // %bb8
 	shl.b64 	%rd18, %rd3, 3;
 	add.s64 	%rd19, %rd2, %rd18;
 	st.global.b64 	[%rd19], %rd20;
-$L__BB7_5:                              // %bb10
+$L__BB8_5:                              // %bb10
 	ret;
                                         // -- End function
 }
@@ -662,7 +749,7 @@ $L__BB7_5:                              // %bb10
 	mul.wide.u32 	%rd23, %r2, %r3;
 	add.s64 	%rd10, %rd23, %rd22;
 	setp.ge.u64 	%p1, %rd10, %rd13;
-	@%p1 bra 	$L__BB8_2;
+	@%p1 bra 	$L__BB9_2;
 // %bb.1:                               // %bb2
 	ld.param.b64 	%rd11, [etd_final_param_8];
 	shl.b64 	%rd24, %rd10, 3;
@@ -704,7 +791,7 @@ $L__BB7_5:                              // %bb10
 	mul.f64 	%rd59, %rd11, %rd56;
 	fma.rn.f64 	%rd60, %rd26, %rd36, %rd59;
 	st.global.b64 	[%rd34+8], %rd60;
-$L__BB8_2:                              // %bb14
+$L__BB9_2:                              // %bb14
 	ret;
                                         // -- End function
 }
@@ -761,7 +848,7 @@ $L__BB8_2:                              // %bb14
 	mul.wide.u32 	%rd22, %r2, %r3;
 	add.s64 	%rd10, %rd22, %rd20;
 	setp.ge.u64 	%p1, %rd10, %rd21;
-	@%p1 bra 	$L__BB9_2;
+	@%p1 bra 	$L__BB10_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd23, %rd10, 3;
 	add.s64 	%rd24, %rd1, %rd23;
@@ -791,7 +878,7 @@ $L__BB8_2:                              // %bb14
 	neg.f64 	%rd46, %rd44;
 	fma.rn.f64 	%rd47, %rd31, %rd39, %rd46;
 	st.global.b64 	[%rd45], %rd47;
-$L__BB9_2:                              // %bb10
+$L__BB10_2:                             // %bb10
 	ret;
                                         // -- End function
 }
@@ -840,13 +927,13 @@ $L__BB9_2:                              // %bb10
 	mul.wide.u32 	%rd19, %r2, %r3;
 	add.s64 	%rd8, %rd19, %rd18;
 	setp.ge.u64 	%p1, %rd8, %rd12;
-	@%p1 bra 	$L__BB10_3;
+	@%p1 bra 	$L__BB11_3;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd20, %rd8, 3;
 	add.s64 	%rd21, %rd1, %rd20;
 	ld.global.b64 	%rd9, [%rd21];
 	setp.ltu.f64 	%p2, %rd9, 0d39B4484BFEEBC2A0;
-	@%p2 bra 	$L__BB10_3;
+	@%p2 bra 	$L__BB11_3;
 // %bb.2:                               // %bb4
 	add.s64 	%rd22, %rd2, %rd20;
 	ld.global.b64 	%rd23, [%rd22];
@@ -889,7 +976,7 @@ $L__BB9_2:                              // %bb10
 	st.global.b64 	[%rd36], %rd55;
 	fma.rn.f64 	%rd56, %rd54, %rd44, %rd38;
 	st.global.b64 	[%rd36+8], %rd56;
-$L__BB10_3:                             // %bb8
+$L__BB11_3:                             // %bb8
 	ret;
                                         // -- End function
 }

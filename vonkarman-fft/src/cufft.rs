@@ -71,6 +71,7 @@ struct CudaLibs {
     cufft_exec_d2z: unsafe extern "C" fn(CufftHandle, *mut f64, *mut [f64; 2]) -> i32,
     cufft_exec_z2d: unsafe extern "C" fn(CufftHandle, *mut [f64; 2], *mut f64) -> i32,
     cufft_set_stream: unsafe extern "C" fn(CufftHandle, *mut c_void) -> i32,
+    cufft_get_size: unsafe extern "C" fn(CufftHandle, *mut usize) -> i32,
     cufft_destroy: unsafe extern "C" fn(CufftHandle) -> i32,
 }
 
@@ -138,6 +139,12 @@ impl CudaLibs {
                     sym: "cufftSetStream".into(),
                     source: e,
                 })?;
+            let cufft_get_size = *cufft_lib
+                .get::<unsafe extern "C" fn(CufftHandle, *mut usize) -> i32>(b"cufftGetSize\0")
+                .map_err(|e| CufftError::SymbolLoad {
+                    sym: "cufftGetSize".into(),
+                    source: e,
+                })?;
             let cufft_destroy = *cufft_lib
                 .get::<unsafe extern "C" fn(CufftHandle) -> i32>(b"cufftDestroy\0")
                 .map_err(|e| CufftError::SymbolLoad {
@@ -155,6 +162,7 @@ impl CudaLibs {
                 cufft_exec_d2z,
                 cufft_exec_z2d,
                 cufft_set_stream,
+                cufft_get_size,
                 cufft_destroy,
             })
         }
@@ -280,6 +288,35 @@ impl CufftBackend {
     /// Grid dimensions this backend was planned for: `(nx, ny, nz)`.
     pub fn dims(&self) -> (usize, usize, usize) {
         (self.nx, self.ny, self.nz)
+    }
+
+    /// cuFFT internal work-area size in bytes, summed over the forward (D2Z) and
+    /// inverse (Z2D) plans this backend owns.
+    ///
+    /// `cufftPlan3d` auto-allocates a separate work area per plan IN ADDITION to
+    /// the `d_real`/`d_complex` host-path scratch and any caller-owned resident
+    /// buffers. `cufftGetSize` reports that per-plan size, so the resident
+    /// memory budget can account for it instead of leaving it uncounted. The two
+    /// plans are queried independently and the sizes added (both are live for the
+    /// lifetime of the backend). Returns `(d2z_bytes, z2d_bytes)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CufftError::Exec`] if `cufftGetSize` fails on either plan.
+    pub fn workarea_bytes(&self) -> Result<(usize, usize), CufftError> {
+        let mut d2z: usize = 0;
+        let mut z2d: usize = 0;
+        unsafe {
+            let rc = (self.libs.cufft_get_size)(self.plan_d2z, &mut d2z as *mut usize);
+            if rc != 0 {
+                return Err(CufftError::Exec { code: rc });
+            }
+            let rc = (self.libs.cufft_get_size)(self.plan_z2d, &mut z2d as *mut usize);
+            if rc != 0 {
+                return Err(CufftError::Exec { code: rc });
+            }
+        }
+        Ok((d2z, z2d))
     }
 
     /// Forward real-to-complex FFT executed DIRECTLY on caller-owned device

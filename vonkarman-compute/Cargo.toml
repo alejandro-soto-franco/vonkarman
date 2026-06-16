@@ -17,10 +17,13 @@ rayon = { workspace = true }
 # PTX itself is built offline (see kernels/ and KERNEL_BUILD.md), so no kernel
 # codegen happens at library build time.
 cuda-core = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline", optional = true }
+# Used only by the `cuda` feature, to load `cudaMemGetInfo` from libcudart for
+# the device-memory probe; same crate the FFT crate uses for cuFFT/cudart.
+libloading = { version = "0.8", optional = true }
 
 [dev-dependencies]
 ndarray = { workspace = true }
 
 [features]
 default = []
-cuda = ["dep:cuda-core"]
+cuda = ["dep:cuda-core", "dep:libloading"]

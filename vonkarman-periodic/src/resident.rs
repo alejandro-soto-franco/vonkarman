@@ -37,13 +37,18 @@
 //!
 //! All device buffers are allocated ONCE at construction and reused every call
 //! (no per-step allocation). The cross product needs all six padded physical
-//! fields live at once, so the solver holds three padded `u_phys`, three padded
-//! `omega_phys`, three padded `cross_phys` real buffers, plus ONE padded complex
-//! scratch reused for every pad/transform and every forward-transform/truncate.
-//! The N-grid `omega_hat[3]`, the ETD stage buffers and per-mode coefficient
-//! buffers complete the resident set. The nonlinear term is written DIRECTLY
-//! into the requested stage buffer, so there is no extra `n_hat` triple or any
-//! device-to-device copy. See the module test for the peak-memory budget.
+//! fields live at once; the solver holds three padded `u_phys` and three padded
+//! `omega_phys` real buffers, plus ONE padded complex scratch reused for every
+//! pad/transform and every forward-transform/truncate. The cross product is
+//! computed IN PLACE over `omega_phys` by the aliasing-safe, register-first
+//! `cross_product_inplace` kernel (it latches all six inputs before any write),
+//! so there is NO separate `cross_phys` triple: that saves three padded real
+//! buffers (~1.27 GiB at N=256), the change that brings N=256 inside 8 GB. The
+//! N-grid `omega_hat[3]`, the ETD stage buffers and per-mode coefficient buffers
+//! complete the resident set. The nonlinear term is written DIRECTLY into the
+//! requested stage buffer, so there is no extra `n_hat` triple or any
+//! device-to-device copy. See the module test for the peak-memory budget
+//! (which includes the cuFFT work areas, queried live via `cufftGetSize`).
 
 use crate::etd::EtdCoeffs;
 use num_complex::Complex;
@@ -68,7 +73,6 @@ pub struct ResidentSolver {
     /// Grid metadata (original `N` grid).
     grid: GridSpec,
     /// cuFFT plan on the original `N` grid, bound to the backend stream.
-    #[allow(dead_code)]
     fft: CufftBackend,
     /// cuFFT plan on the 3/2-padded grid, bound to the backend stream.
     fft_padded: CufftBackend,
@@ -107,10 +111,12 @@ pub struct ResidentSolver {
     pad_scratch: CplxBuf<f64>,
     /// Three padded physical velocity buffers (length `preal_len`).
     u_phys: [RealBuf<f64>; 3],
-    /// Three padded physical vorticity buffers (length `preal_len`).
+    /// Three padded physical vorticity buffers (length `preal_len`). The
+    /// aliasing-safe cross product writes its result IN PLACE over these (the
+    /// register-first kernel latches all six inputs before any write), so no
+    /// separate `cross_phys` triple is held. This removes 3 padded real buffers
+    /// (~1.27 GiB at N=256), the single change that brings N=256 inside 8 GB.
     omega_phys: [RealBuf<f64>; 3],
-    /// Three padded physical cross-product buffers (length `preal_len`).
-    cross_phys: [RealBuf<f64>; 3],
 
     /// ETD stage nonlinear terms `n1, n2, n3, n4`, each three `N`-grid spectral
     /// components. Allocated once; the nonlinear writes directly into these.
@@ -243,7 +249,6 @@ impl ResidentSolver {
         let pad_scratch = backend.alloc_cplx::<f64>(pcplx_len);
         let u_phys = alloc_real3(&backend, preal_len);
         let omega_phys = alloc_real3(&backend, preal_len);
-        let cross_phys = alloc_real3(&backend, preal_len);
 
         let stage_n = [
             alloc_cplx3(&backend, cplx_len),
@@ -282,7 +287,6 @@ impl ResidentSolver {
             pad_scratch,
             u_phys,
             omega_phys,
-            cross_phys,
             stage_n,
             temp,
             etd_exp_full,
@@ -308,29 +312,58 @@ impl ResidentSolver {
         self.cplx_len
     }
 
-    /// Rough peak device-memory footprint of the resident buffers, in bytes.
+    /// Analytic peak device-memory footprint of the resident solver, in bytes,
+    /// INCLUDING the cuFFT work areas.
     ///
-    /// Counts only the large persistent allocations, all `f64` (8 bytes):
+    /// Counts the large persistent allocations, all `f64` (8 bytes):
     ///
     /// - `N`-grid complex buffers (`2 * cplx_len` f64 each): `u_hat` (3),
     ///   `omega_hat` (3), four ETD stage triples (12), `temp` (3) = 21 complex
     ///   buffers, plus the one padded complex scratch (`2 * pcplx_len` f64).
-    /// - padded real buffers (`preal_len` f64 each): `u_phys` (3),
-    ///   `omega_phys` (3), `cross_phys` (3) = 9.
+    /// - padded real buffers (`preal_len` f64 each): `u_phys` (3) and
+    ///   `omega_phys` (3) = 6. The cross product writes in place over
+    ///   `omega_phys`, so there is NO separate `cross_phys` triple (the packing
+    ///   change that brought `N = 256` under 8 GB).
     /// - real coefficient/wavenumber buffers (`cplx_len` f64 each): `kx`, `ky`,
     ///   `kz`, `k2` and the seven ETD coefficient buffers = 11.
+    /// - the two cuFFT padded-plan work areas (forward D2Z + inverse Z2D),
+    ///   queried live from the plan via `cufftGetSize`. The `N`-grid plan's work
+    ///   areas are also counted. cuFFT's own `d_real`/`d_complex` host-path
+    ///   scratch (one padded real + one padded complex per plan) is counted too,
+    ///   since each [`CufftBackend`] allocates it at construction.
     ///
-    /// This is an estimate of the dominant resident set (it ignores cuFFT's own
-    /// internal work area, which the plan allocates separately), used by the
-    /// memory-budget test to flag whether `N = 256` fits the 8 GB GPU.
+    /// Used by the memory-budget test and the resident run to compare the
+    /// analytic estimate against the ACTUAL `cudaMemGetInfo` peak.
     pub fn peak_memory_bytes(&self) -> usize {
         let f64_bytes = std::mem::size_of::<f64>();
         let cplx_n_buffers = 21; // u_hat + omega_hat + 4 stage triples + temp
         let n_complex = cplx_n_buffers * 2 * self.cplx_len;
         let padded_complex = 2 * self.pcplx_len; // one padded complex scratch
-        let padded_real = 9 * self.preal_len; // u_phys + omega_phys + cross_phys
+        let padded_real = 6 * self.preal_len; // u_phys + omega_phys (cross in place)
         let real_coeffs = 11 * self.cplx_len; // kx, ky, kz, k2 + 7 ETD coeffs
-        (n_complex + padded_complex + padded_real + real_coeffs) * f64_bytes
+        let buffers = (n_complex + padded_complex + padded_real + real_coeffs) * f64_bytes;
+
+        // cuFFT internal work areas plus each plan's own host-path scratch
+        // (d_real = preal/real f64s, d_complex = 2 * pcplx/cplx f64s).
+        let (pd2z, pz2d) = self.fft_padded.workarea_bytes().unwrap_or((0, 0));
+        let (nd2z, nz2d) = self.fft.workarea_bytes().unwrap_or((0, 0));
+        let padded_plan_scratch = (self.preal_len + 2 * self.pcplx_len) * f64_bytes;
+        let n_plan_scratch = (self.real_len + 2 * self.cplx_len) * f64_bytes;
+
+        buffers + pd2z + pz2d + nd2z + nz2d + padded_plan_scratch + n_plan_scratch
+    }
+
+    /// cuFFT padded-plan work-area sizes `(d2z_bytes, z2d_bytes)` for the budget.
+    pub fn padded_workarea_bytes(&self) -> (usize, usize) {
+        self.fft_padded.workarea_bytes().unwrap_or((0, 0))
+    }
+
+    /// Queries `(free, total)` device memory in bytes via `cudaMemGetInfo`, so
+    /// the run can record ACTUAL peak usage (free before alloc minus free now).
+    pub fn mem_get_info(&self) -> (usize, usize) {
+        self.backend
+            .mem_get_info()
+            .expect("ResidentSolver: cudaMemGetInfo failed")
     }
 
     /// Downloads spectral velocity component `c` into a host buffer
@@ -408,24 +441,42 @@ impl ResidentSolver {
             self.pad_scale_inverse(input, FieldKind::Vorticity, c, inv_n);
         }
 
-        // Step 3: pointwise cross product over the 6 padded physical fields.
-        // u_phys, omega_phys, cross_phys and backend are distinct fields, so the
-        // disjoint borrows need no placeholder allocation.
+        // Step 3: aliasing-safe pointwise cross product over the 6 padded
+        // physical fields, written IN PLACE over omega_phys (cx==ox, cy==oy,
+        // cz==oz). The register-first kernel latches all six inputs before any
+        // write, so this is bit-identical to the disjoint cross while saving the
+        // three cross_phys buffers. omega_phys is no longer needed as a vorticity
+        // source after this point (the forward transform below reads the cross
+        // result it now holds).
+        //
+        // The borrow has u_phys (immutable, 3) plus omega_phys appearing BOTH as
+        // the immutable o-inputs and the mutable c-outputs, which Rust cannot
+        // express as overlapping borrows of one array. We therefore raw-alias the
+        // omega_phys pointers for the o-inputs while holding the &mut for the
+        // c-outputs; the kernel's read-before-write contract makes that sound.
         {
             let [up0, up1, up2] = &self.u_phys;
-            let [op0, op1, op2] = &self.omega_phys;
-            let [cp0, cp1, cp2] = &mut self.cross_phys;
+            // SAFETY: the cross_product_inplace kernel reads all six inputs into
+            // registers before writing any output, and each thread owns a unique
+            // index, so reading omega_phys through these shared references while
+            // the kernel writes the same buffers is sound (no read observes a
+            // post-write value, no two threads write one slot). The buffers stay
+            // resident in the active context for the whole synchronous launch
+            // (we hold &mut self).
+            let omega_ptr = &self.omega_phys as *const [RealBuf<f64>; 3];
+            let [op0, op1, op2] = unsafe { &*omega_ptr };
+            let [cp0, cp1, cp2] = &mut self.omega_phys;
             self.backend
-                .cross_product::<f64>(up0, up1, up2, op0, op1, op2, cp0, cp1, cp2)
-                .expect("ResidentSolver: cross_product launch failed");
+                .cross_product_inplace_aliased::<f64>(up0, up1, up2, op0, op1, op2, cp0, cp1, cp2)
+                .expect("ResidentSolver: cross_product_inplace launch failed");
         }
 
-        // Step 4: forward-transform each padded cross field, truncate to N into
-        // stage_n[out_stage], then scale by inv_scale = N / N_padded.
+        // Step 4: forward-transform each padded cross field (now in omega_phys),
+        // truncate to N into stage_n[out_stage], then scale by inv_scale.
         let inv_scale = (self.real_len as f64) / (self.preal_len as f64);
         for c in 0..3 {
-            // Forward transform padded cross[c] -> padded complex scratch.
-            let d_real = self.backend.real_device_ptr(&self.cross_phys[c]);
+            // Forward transform padded cross[c] (held in omega_phys) -> scratch.
+            let d_real = self.backend.real_device_ptr(&self.omega_phys[c]);
             let d_cplx = self.backend.cplx_device_ptr(&self.pad_scratch);
             // SAFETY: pointers from resident buffers in the active context; the
             // padded plan matches (pnx, pny, pnz); cross_phys[c] is preal_len f64
@@ -808,8 +859,10 @@ mod tests {
             "resident nonlinear relative error {max_rel:e} exceeds 1e-12"
         );
 
-        // Document the memory budget at the target grids (no GPU work, pure
-        // arithmetic on the buffer counts).
+        // Document the resident-buffer budget at the target grids (no GPU work,
+        // pure arithmetic on the buffer counts; 6 padded real buffers now, since
+        // the cross product is in place over omega_phys). The cuFFT work areas
+        // are reported separately by the resident run via cufftGetSize.
         for &nn in &[128usize, 256] {
             let g = GridSpec::cubic(nn, 2.0 * std::f64::consts::PI);
             let (gsnx, gsny, gsnz) = g.spectral_shape();
@@ -818,12 +871,113 @@ mod tests {
             let pcplx = pg.nx * pg.ny * (pg.nz / 2 + 1);
             let preal = pg.nx * pg.ny * pg.nz;
             let bytes =
-                (21 * 2 * cplx + 2 * pcplx + 9 * preal + 11 * cplx) * std::mem::size_of::<f64>();
+                (21 * 2 * cplx + 2 * pcplx + 6 * preal + 11 * cplx) * std::mem::size_of::<f64>();
             eprintln!(
-                "resident peak-memory estimate at N={nn}: {:.2} GiB",
+                "resident buffer-only estimate at N={nn}: {:.3} GiB (excl. cuFFT work areas)",
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)
             );
         }
+        // And the live full estimate for the constructed N=32 solver, which DOES
+        // include the cuFFT work areas (cufftGetSize) and plan scratch.
+        eprintln!(
+            "resident full peak_memory_bytes at N={n} (incl. cuFFT): {:.4} GiB",
+            solver.peak_memory_bytes() as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+        let (free, total) = solver.mem_get_info();
+        eprintln!(
+            "cudaMemGetInfo at N={n}: free {:.3} GiB / total {:.3} GiB",
+            free as f64 / (1024.0 * 1024.0 * 1024.0),
+            total as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+    }
+
+    /// The aliasing-safe `cross_product_inplace` (outputs aliasing the omega
+    /// inputs) must be BIT-IDENTICAL to the disjoint `cross_product` on the same
+    /// data. Runs both on the GPU and asserts every f64 matches exactly.
+    #[test]
+    fn cross_product_inplace_bit_identical_to_disjoint() {
+        let Some(backend) = backend_or_skip() else {
+            return;
+        };
+
+        // Deterministic pseudo-random padded physical fields.
+        let n = 6000;
+        let make = |seed: f64| -> Vec<f64> {
+            (0..n)
+                .map(|i| (seed + 0.017 * i as f64).sin() * 1.9 - 0.4)
+                .collect()
+        };
+        let ux = make(0.2);
+        let uy = make(1.1);
+        let uz = make(2.5);
+        let ox = make(3.3);
+        let oy = make(4.7);
+        let oz = make(5.9);
+
+        let dux = backend.upload_real::<f64>(&ux);
+        let duy = backend.upload_real::<f64>(&uy);
+        let duz = backend.upload_real::<f64>(&uz);
+
+        // Disjoint reference: fresh omega buffers, fresh cross outputs.
+        let dox = backend.upload_real::<f64>(&ox);
+        let doy = backend.upload_real::<f64>(&oy);
+        let doz = backend.upload_real::<f64>(&oz);
+        let mut rcx = backend.alloc_real::<f64>(n);
+        let mut rcy = backend.alloc_real::<f64>(n);
+        let mut rcz = backend.alloc_real::<f64>(n);
+        backend
+            .cross_product::<f64>(
+                &dux, &duy, &duz, &dox, &doy, &doz, &mut rcx, &mut rcy, &mut rcz,
+            )
+            .expect("disjoint cross launch failed");
+        let ref_cx = backend.download_real::<f64>(&rcx);
+        let ref_cy = backend.download_real::<f64>(&rcy);
+        let ref_cz = backend.download_real::<f64>(&rcz);
+
+        // In-place: outputs alias the omega buffers (cx==ox, cy==oy, cz==oz).
+        // We must alias the same buffers for both the o-inputs and c-outputs, so
+        // use raw pointers (the kernel's read-before-write makes this sound).
+        let mut aox = backend.upload_real::<f64>(&ox);
+        let mut aoy = backend.upload_real::<f64>(&oy);
+        let mut aoz = backend.upload_real::<f64>(&oz);
+        {
+            // SAFETY: the kernel reads all six inputs before any write and each
+            // thread owns a unique index, so reading aox/aoy/aoz through shared
+            // refs while writing them through the &mut is sound.
+            let i_ox = &aox as *const RealBuf<f64>;
+            let i_oy = &aoy as *const RealBuf<f64>;
+            let i_oz = &aoz as *const RealBuf<f64>;
+            let (ri_ox, ri_oy, ri_oz) = unsafe { (&*i_ox, &*i_oy, &*i_oz) };
+            backend
+                .cross_product_inplace_aliased::<f64>(
+                    &dux, &duy, &duz, ri_ox, ri_oy, ri_oz, &mut aox, &mut aoy, &mut aoz,
+                )
+                .expect("in-place cross launch failed");
+        }
+        let ip_cx = backend.download_real::<f64>(&aox);
+        let ip_cy = backend.download_real::<f64>(&aoy);
+        let ip_cz = backend.download_real::<f64>(&aoz);
+
+        for i in 0..n {
+            assert_eq!(
+                ref_cx[i].to_bits(),
+                ip_cx[i].to_bits(),
+                "cx bit mismatch at {i}: disjoint {} vs in-place {}",
+                ref_cx[i],
+                ip_cx[i]
+            );
+            assert_eq!(
+                ref_cy[i].to_bits(),
+                ip_cy[i].to_bits(),
+                "cy bit mismatch at {i}"
+            );
+            assert_eq!(
+                ref_cz[i].to_bits(),
+                ip_cz[i].to_bits(),
+                "cz bit mismatch at {i}"
+            );
+        }
+        eprintln!("cross_product_inplace is bit-identical to disjoint over {n} points");
     }
 
     #[test]

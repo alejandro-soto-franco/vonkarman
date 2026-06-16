@@ -311,6 +311,129 @@ impl CudaBackend {
         stream.synchronize()
     }
 
+    /// Aliasing-safe cross product `c = u x omega`, where the outputs `cx`/`cy`/
+    /// `cz` MAY ALIAS the omega inputs `ox`/`oy`/`oz` (same device buffers).
+    ///
+    /// Loads the offline-compiled `cross_product_inplace` kernel and launches it
+    /// on the default stream, then synchronises. The kernel reads all six inputs
+    /// for each grid point into registers BEFORE writing any output, so passing
+    /// `cx == ox`, `cy == oy`, `cz == oz` is sound: the resident solver uses this
+    /// to write the cross result over the vorticity physical buffers and drop the
+    /// three separate cross buffers (~1.27 GiB at N=256).
+    ///
+    /// The arithmetic is identical to [`Self::cross_product`] (same fused
+    /// `a * b - c * d` per component), so the result is bit-identical to the
+    /// non-aliasing form on disjoint buffers; only the read-before-write ordering
+    /// differs.
+    ///
+    /// # Safety
+    ///
+    /// The caller may pass `cx`/`cy`/`cz` either fully disjoint from the inputs
+    /// or exactly aliasing `ox`/`oy`/`oz`. Partial or cross-component overlap
+    /// (e.g. `cx == oy`) is NOT supported and is undefined behaviour.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cross_product_inplace_aliased<F: Float>(
+        &self,
+        ux: &RealBuf<F>,
+        uy: &RealBuf<F>,
+        uz: &RealBuf<F>,
+        ox: &RealBuf<F>,
+        oy: &RealBuf<F>,
+        oz: &RealBuf<F>,
+        cx: &mut RealBuf<F>,
+        cy: &mut RealBuf<F>,
+        cz: &mut RealBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let n = ux.buf.len();
+        debug_assert!(
+            [
+                uy.buf.len(),
+                uz.buf.len(),
+                ox.buf.len(),
+                oy.buf.len(),
+                oz.buf.len(),
+                cx.buf.len(),
+                cy.buf.len(),
+                cz.buf.len(),
+            ]
+            .iter()
+            .all(|&l| l == n),
+            "cross_product_inplace: all buffers must have equal length"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("cross_product_inplace")?;
+
+        // Param order matches the kernel: ux, uy, uz, ox, oy, oz, cx, cy, cz,
+        // each &[f64] / DisjointSlice<f64> lowering to a (ptr, len) pair.
+        let mut ptrs = [
+            ux.buf.cu_deviceptr(),
+            uy.buf.cu_deviceptr(),
+            uz.buf.cu_deviceptr(),
+            ox.buf.cu_deviceptr(),
+            oy.buf.cu_deviceptr(),
+            oz.buf.cu_deviceptr(),
+            cx.buf.cu_deviceptr(),
+            cy.buf.cu_deviceptr(),
+            cz.buf.cu_deviceptr(),
+        ];
+        let mut lens: [u64; 9] = [n as u64; 9];
+
+        let mut params: [*mut std::ffi::c_void; 18] = [std::ptr::null_mut(); 18];
+        for k in 0..9 {
+            params[2 * k] = &mut ptrs[k] as *mut _ as *mut std::ffi::c_void;
+            params[2 * k + 1] = &mut lens[k] as *mut _ as *mut std::ffi::c_void;
+        }
+
+        let cfg = LaunchConfig::for_num_elems(n as u32);
+        // SAFETY: as for cross_product; 18 params in the (ptr, len) order the PTX
+        // expects, grid sized for `n` points, kernel bounds-checks `i < n`. The
+        // kernel latches all six reads before any write, so the documented
+        // exact-alias (cx==ox, cy==oy, cz==oz) is sound. Params outlive the call.
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
+    /// Queries free and total device memory in bytes via `cudaMemGetInfo`.
+    ///
+    /// Loads `cudaMemGetInfo` from the CUDA runtime (the same `libcudart.so` the
+    /// driver already has resident) through the cuda-core context's library
+    /// loader, so the resident run can record ACTUAL device usage (free before
+    /// allocation minus free at peak) rather than only the analytic estimate.
+    /// Returns `(free, total)` in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the driver error if the runtime symbol cannot be resolved or the
+    /// query fails.
+    pub fn mem_get_info(&self) -> Result<(usize, usize), cuda_core::DriverError> {
+        // libloading is already a dependency of the workspace (cufft path); load
+        // libcudart.so directly here for the single cudaMemGetInfo symbol.
+        let lib = unsafe { libloading::Library::new("libcudart.so") }
+            .expect("mem_get_info: libcudart.so not loadable");
+        let mut free: usize = 0;
+        let mut total: usize = 0;
+        let rc = unsafe {
+            let f = lib
+                .get::<unsafe extern "C" fn(*mut usize, *mut usize) -> i32>(b"cudaMemGetInfo\0")
+                .expect("mem_get_info: cudaMemGetInfo symbol missing");
+            f(&mut free as *mut usize, &mut total as *mut usize)
+        };
+        assert_eq!(rc, 0, "cudaMemGetInfo failed with code {rc}");
+        Ok((free, total))
+    }
+
     /// Spectral curl `omega_hat = i k x u_hat` over resident device buffers.
     ///
     /// Loads the offline-compiled `curl` kernel from the checked-in PTX and
