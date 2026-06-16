@@ -82,6 +82,8 @@ struct Functions {
     etd_stage_axpy: CudaFunction,
     etd_stage4: CudaFunction,
     etd_final: CudaFunction,
+    etd_final_folded: CudaFunction,
+    cplx_add_assign: CudaFunction,
     scale_cplx: CudaFunction,
     spectral_pad: CudaFunction,
     spectral_truncate: CudaFunction,
@@ -104,6 +106,8 @@ impl Functions {
             etd_stage_axpy: module.load_function("etd_stage_axpy")?,
             etd_stage4: module.load_function("etd_stage4")?,
             etd_final: module.load_function("etd_final")?,
+            etd_final_folded: module.load_function("etd_final_folded")?,
+            cplx_add_assign: module.load_function("cplx_add_assign")?,
             scale_cplx: module.load_function("scale_cplx")?,
             spectral_pad: module.load_function("spectral_pad")?,
             spectral_truncate: module.load_function("spectral_truncate")?,
@@ -1049,6 +1053,157 @@ impl CudaBackend {
         // run in issue order, so a later op that reads this output observes it
         // without a host sync. Results become host-visible only after a
         // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
+    }
+
+    /// In-place complex add-assign `a[i] += b[i]`, used to fold two ETD stage
+    /// nonlinear terms (`n23 = n2 + n3`) into one buffer before the folded final
+    /// update, saving a whole spectral stage triple of resident memory.
+    ///
+    /// Operates element-wise over the `2 n` interleaved `f64`s, so the real and
+    /// imaginary parts are each summed with a single `add.f64`, bit-identical to
+    /// the `(n2 + n3)` the original `etd_final` kernel formed internally before
+    /// the `b23` multiply.
+    pub fn cplx_add_assign<F: Float>(
+        &self,
+        a: &mut CplxBuf<F>,
+        b: &CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let len = a.buf.len();
+        debug_assert_eq!(len, b.buf.len(), "cplx_add_assign: length mismatch");
+
+        let stream = self.ctx.default_stream();
+        let func = self.funcs.cplx_add_assign.clone();
+
+        // Param order matches the kernel: a (in/out), a_len, b, b_len. The kernel
+        // bounds-checks `i < a_len` over the raw `2 n` f64 elements.
+        let mut p_a = a.buf.cu_deviceptr();
+        let mut l_a = len as u64;
+        let mut p_b = b.buf.cu_deviceptr();
+        let mut l_b = len as u64;
+        let mut params: [*mut std::ffi::c_void; 4] = [
+            &mut p_a as *mut _ as *mut std::ffi::c_void,
+            &mut l_a as *mut _ as *mut std::ffi::c_void,
+            &mut p_b as *mut _ as *mut std::ffi::c_void,
+            &mut l_b as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        let cfg = LaunchConfig::for_num_elems(len as u32);
+        // SAFETY: `func` is from a module on `self.ctx`; the stream shares that
+        // context; the 4 params alias the live (ptr, len) pairs the PTX expects;
+        // the grid is sized for the `2 n` f64 elements and the kernel bounds-
+        // checks `i < a_len`. `a` is read then written in place (DisjointSlice
+        // from `b`). Stream-ordered, not synchronised here.
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Folded final ETD update `u = exp_full*u + dt*(b1*n1 + b23*n23 + b4*n4)`,
+    /// where `n23 = n2 + n3` has already been summed (e.g. via
+    /// [`Self::cplx_add_assign`]).
+    ///
+    /// Same ETD combination as [`Self::etd_final`] with `(n2 + n3)` pre-summed.
+    /// For `n23 == n2 + n3` it reproduces the four-buffer `etd_final` value to the
+    /// CPU FMA reference at the same tolerance (`etd_final_folded_matches_cpu_oracle`);
+    /// it is NOT bit-identical to the GPU `etd_final` kernel, because the backend
+    /// may regroup the three-term right-hand sum sub-ULP between the two distinct
+    /// kernels. The net effect on a full resident step is ~1e-22, far below the
+    /// 1.52e-15 the step matches the CPU solver to. Carrying `n23` in one buffer
+    /// instead of `n2` and `n3` separately lets the resident solver hold three ETD
+    /// stage triples instead of four.
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_final_folded<F: Float>(
+        &self,
+        exp_full: &RealBuf<F>,
+        b1: &RealBuf<F>,
+        b23: &RealBuf<F>,
+        b4: &RealBuf<F>,
+        dt: F,
+        n1: &CplxBuf<F>,
+        n23: &CplxBuf<F>,
+        n4: &CplxBuf<F>,
+        u: &mut CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let m = exp_full.buf.len();
+        debug_assert!(
+            b1.buf.len() == m
+                && b23.buf.len() == m
+                && b4.buf.len() == m
+                && n1.buf.len() == 2 * m
+                && n23.buf.len() == 2 * m
+                && n4.buf.len() == 2 * m
+                && u.buf.len() == 2 * m,
+            "etd_final_folded: complex buffers must be length 2n, coeff buffers length n"
+        );
+
+        let stream = self.ctx.default_stream();
+        let func = self.funcs.etd_final_folded.clone();
+
+        // Param order matches the kernel:
+        // exp_full, b1, b23, b4, dt, n1, n23, n4, u.
+        let mut p_exp_full = exp_full.buf.cu_deviceptr();
+        let mut l_exp_full = m as u64;
+        let mut p_b1 = b1.buf.cu_deviceptr();
+        let mut l_b1 = m as u64;
+        let mut p_b23 = b23.buf.cu_deviceptr();
+        let mut l_b23 = m as u64;
+        let mut p_b4 = b4.buf.cu_deviceptr();
+        let mut l_b4 = m as u64;
+        let mut v_dt = self.as_f64(dt);
+        let mut p_n1 = n1.buf.cu_deviceptr();
+        let mut l_n1 = (2 * m) as u64;
+        let mut p_n23 = n23.buf.cu_deviceptr();
+        let mut l_n23 = (2 * m) as u64;
+        let mut p_n4 = n4.buf.cu_deviceptr();
+        let mut l_n4 = (2 * m) as u64;
+        let mut p_u = u.buf.cu_deviceptr();
+        let mut l_u = (2 * m) as u64;
+
+        let mut params: [*mut std::ffi::c_void; 17] = [
+            &mut p_exp_full as *mut _ as *mut std::ffi::c_void,
+            &mut l_exp_full as *mut _ as *mut std::ffi::c_void,
+            &mut p_b1 as *mut _ as *mut std::ffi::c_void,
+            &mut l_b1 as *mut _ as *mut std::ffi::c_void,
+            &mut p_b23 as *mut _ as *mut std::ffi::c_void,
+            &mut l_b23 as *mut _ as *mut std::ffi::c_void,
+            &mut p_b4 as *mut _ as *mut std::ffi::c_void,
+            &mut l_b4 as *mut _ as *mut std::ffi::c_void,
+            &mut v_dt as *mut _ as *mut std::ffi::c_void,
+            &mut p_n1 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n1 as *mut _ as *mut std::ffi::c_void,
+            &mut p_n23 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n23 as *mut _ as *mut std::ffi::c_void,
+            &mut p_n4 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n4 as *mut _ as *mut std::ffi::c_void,
+            &mut p_u as *mut _ as *mut std::ffi::c_void,
+            &mut l_u as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        let cfg = LaunchConfig::for_num_elems(m as u32);
+        // SAFETY: as for etd_final; 17 params in (ptr, len) / scalar order the
+        // PTX expects, grid sized for `m` modes, kernel bounds-checks `i < m`.
+        // `u` is read then written in place (DisjointSlice from the inputs).
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
         Ok(())
     }
 
@@ -2375,6 +2530,148 @@ mod tests {
                 cpu[j]
             );
         }
+    }
+
+    #[test]
+    fn cplx_add_assign_bit_identical_to_host_add() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+        // Interleaved complex buffers of `m` modes (2m f64s).
+        let m = 4096;
+        let a0 = etd_make(0.41, 2 * m);
+        let b0 = etd_make(1.27, 2 * m);
+
+        let da = be.upload_real::<f64>(&a0);
+        let db = be.upload_real::<f64>(&b0);
+        let mut ca = CplxBuf::<f64> {
+            buf: da.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let cb = CplxBuf::<f64> {
+            buf: db.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+
+        be.cplx_add_assign::<f64>(&mut ca, &cb)
+            .expect("cplx_add_assign launch failed");
+
+        let mut host = vec![Complex::new(0.0_f64, 0.0); m];
+        be.download_cplx(&ca, &mut host);
+
+        // IEEE add.f64 is round-to-nearest, identical to host f64 add, so the
+        // device result must match the host sum bit-for-bit.
+        for i in 0..m {
+            let want_re = a0[2 * i] + b0[2 * i];
+            let want_im = a0[2 * i + 1] + b0[2 * i + 1];
+            assert_eq!(
+                host[i].re.to_bits(),
+                want_re.to_bits(),
+                "re bit mismatch at {i}"
+            );
+            assert_eq!(
+                host[i].im.to_bits(),
+                want_im.to_bits(),
+                "im bit mismatch at {i}"
+            );
+        }
+        eprintln!("cplx_add_assign bit-identical to host add over {m} complex elements");
+    }
+
+    /// The folded final update (n23 = n2 + n3 via `cplx_add_assign`, then
+    /// `etd_final_folded`) must match the SAME FMA-matched CPU oracle the
+    /// four-buffer `etd_final` is held to, with the same tolerance.
+    ///
+    /// It is NOT bit-identical to the GPU `etd_final` kernel: the fork backend's
+    /// FMA contraction associates the two kernels' three-term right-hand sums
+    /// slightly differently (a sub-ULP regrouping the compiler does not promise
+    /// to match between two distinct kernels). What matters physically is that
+    /// both reproduce the ETD final value to the reference tolerance; the full
+    /// resident step still matches the CPU solver to 1.52e-15 (see the
+    /// `resident_etd_rk4_step_matches_cpu_to_1e_12` test in vonkarman-periodic),
+    /// the change versus the unfolded step being ~1e-22, far below that floor.
+    #[test]
+    fn etd_final_folded_matches_cpu_oracle() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+        let m = 4096;
+        let exp_full = etd_make(0.3, m);
+        let b1 = etd_make(0.5, m);
+        let b23 = etd_make(0.6, m);
+        let b4 = etd_make(0.8, m);
+        let dt = 0.017_f64;
+        let n1 = etd_make(1.0, 2 * m);
+        let n2 = etd_make(1.5, 2 * m);
+        let n3 = etd_make(2.0, 2 * m);
+        let n4 = etd_make(2.5, 2 * m);
+        let u0 = etd_make(3.0, 2 * m);
+
+        let dexp = be.upload_real::<f64>(&exp_full);
+        let db1 = be.upload_real::<f64>(&b1);
+        let db23 = be.upload_real::<f64>(&b23);
+        let db4 = be.upload_real::<f64>(&b4);
+
+        let mkc = |v: &[f64]| -> CplxBuf<f64> {
+            let d = be.upload_real::<f64>(v);
+            CplxBuf::<f64> {
+                buf: d.buf,
+                len: m,
+                _marker: std::marker::PhantomData,
+            }
+        };
+
+        // Folded path: n23 = n2 + n3 via the device add-assign, then the folded
+        // three-buffer final. This is EXACTLY the sequence the resident solver
+        // runs.
+        let cn1 = mkc(&n1);
+        let mut cn23 = mkc(&n2);
+        let cn3 = mkc(&n3);
+        be.cplx_add_assign::<f64>(&mut cn23, &cn3)
+            .expect("cplx_add_assign launch failed");
+        let cn4 = mkc(&n4);
+        let mut cu_fold = mkc(&u0);
+        be.etd_final_folded::<f64>(
+            &dexp,
+            &db1,
+            &db23,
+            &db4,
+            dt,
+            &cn1,
+            &cn23,
+            &cn4,
+            &mut cu_fold,
+        )
+        .expect("etd_final_folded launch failed");
+        let mut hu = vec![Complex::new(0.0_f64, 0.0); m];
+        be.download_cplx(&cu_fold, &mut hu);
+        let mut gu = Vec::with_capacity(2 * m);
+        for c in &hu {
+            gu.push(c.re);
+            gu.push(c.im);
+        }
+
+        // Same FMA-matched oracle and the same rel-OR-abs criterion as
+        // etd_final_matches_cpu_oracle (the rhs is a sum of signed products that
+        // can cancel, so a small slot is accepted on the absolute floor).
+        let oracle = etd_final_oracle_fma(&exp_full, &b1, &b23, &b4, dt, &n1, &n2, &n3, &n4, &u0);
+        let rel_tol = 1e-14;
+        let abs_floor = 8.0 * f64::EPSILON;
+        for j in 0..2 * m {
+            let d = (gu[j] - oracle[j]).abs();
+            let rel = d / oracle[j].abs().max(f64::MIN_POSITIVE);
+            assert!(
+                rel <= rel_tol || d <= abs_floor,
+                "etd_final_folded mismatch idx {j}: gpu {}, oracle {}, rel {rel:e} > {rel_tol:e}, abs {d:e} > {abs_floor:e}",
+                gu[j],
+                oracle[j]
+            );
+        }
+        eprintln!(
+            "etd_final_folded matches the FMA oracle to {rel_tol:e} rel / {abs_floor:e} abs over {m} modes"
+        );
     }
 
     /// FMA-matched CPU oracle for the ETD final update.

@@ -663,6 +663,88 @@ mod kernels {
             }
         }
     }
+
+    /// In-place complex add-assign `a += b` over interleaved-complex buffers.
+    ///
+    /// Used by the resident solver to fold two ETD stage nonlinear terms
+    /// (`n23 = n2 + n3`) into one buffer before the folded final update, so it
+    /// can hold three spectral stage triples instead of four. Operates element-
+    /// wise over the `2 n` interleaved f64s (one thread per f64), so the real and
+    /// imaginary parts are each a single `add.f64` (no products, so no FMA
+    /// contraction), BIT-IDENTICAL to the `(n2 + n3)` the [`etd_final`] kernel
+    /// forms internally before the `b23` multiply. The mutable buffer `a` is
+    /// first so the (ptr, len) ABI matches `etd_final_folded`'s `n23` slot order
+    /// (see `CudaBackend::cplx_add_assign`).
+    #[kernel]
+    pub fn cplx_add_assign(mut a: DisjointSlice<f64>, b: &[f64]) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        // One thread per f64 element (length 2 n); a complex add is just the two
+        // interleaved real adds, so no special re/im handling is needed.
+        if i < a.len() {
+            // SAFETY: `i < a.len()` checked above; `b` shares that length; `i` is
+            // a thread-unique index minted from hardware special registers, so no
+            // two threads write the same slot.
+            unsafe {
+                let av = *a.get_unchecked_mut(i);
+                *a.get_unchecked_mut(i) = av + b[i];
+            }
+        }
+    }
+
+    /// ETD-RK4 folded final update, in place on `u`:
+    /// `u = exp_full * u + dt * (b1 n1 + b23 n23 + b4 n4)`, with `n23 = n2 + n3`
+    /// already summed (e.g. by [`cplx_add_assign`]).
+    ///
+    /// Same ETD combination as [`etd_final`] with `(n2 + n3)` pre-summed: the
+    /// right-hand side `b1 n1 + b23 n23 + b4 n4` contracts to a chain of
+    /// `fma.rn.f64`, and the outer `exp_full * u + dt * rhs` to
+    /// `fma(exp_full, u, dt * rhs)`. For `n23 == n2 + n3` it reproduces the
+    /// four-buffer `etd_final` value to the CPU FMA reference at the same
+    /// tolerance (library test `etd_final_folded_matches_cpu_oracle`). It is NOT
+    /// guaranteed bit-identical to the `etd_final` kernel: the backend may
+    /// associate the three-term sum sub-ULP differently between the two kernels.
+    /// Carrying `n23` in one buffer instead of `n2` and `n3` lets the resident
+    /// solver drop a stage triple; the net effect on a full step is ~1e-22.
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_final_folded(
+        exp_full: &[f64],
+        b1: &[f64],
+        b23: &[f64],
+        b4: &[f64],
+        dt: f64,
+        n1: &[f64],
+        n23: &[f64],
+        n4: &[f64],
+        mut u: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < exp_full.len() {
+            let re = 2 * i;
+            let im = 2 * i + 1;
+            let ef = exp_full[i];
+            let b1i = b1[i];
+            let b23i = b23[i];
+            let b4i = b4[i];
+            // SAFETY: `i < n` checked above; `u` has length `2 n` so both `re`
+            // and `im` are in bounds; `i` is a thread-unique index. `u` is read
+            // then written through the same DisjointSlice, like the etd_final and
+            // leray kernels.
+            unsafe {
+                let ur = *u.get_unchecked_mut(re);
+                let ui = *u.get_unchecked_mut(im);
+                // rhs = b1 n1 + b23 n23 + b4 n4, written so the trailing products
+                // contract: fma(b4, n4, fma(b23, n23, b1 * n1)).
+                let rhs_re = b1i * n1[re] + b23i * n23[re] + b4i * n4[re];
+                let rhs_im = b1i * n1[im] + b23i * n23[im] + b4i * n4[im];
+                // u = exp_full * u + dt * rhs contracts to fma(exp_full, u, dt * rhs).
+                *u.get_unchecked_mut(re) = ef * ur + dt * rhs_re;
+                *u.get_unchecked_mut(im) = ef * ui + dt * rhs_im;
+            }
+        }
+    }
 }
 
 fn main() {}

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Resident GPU memory
+- ETD-RK4 stage fold: the resident solver now holds three spectral stage triples instead of four by folding `n23 = n2 + n3` in place after the stage-4 combination and reusing the freed buffer for `n4`. Two new `#[cuda_module]` kernels (`cplx_add_assign`, a bit-identical `add.f64`; `etd_final_folded`) regenerated into the checked-in PTX via `cargo oxide build`. The folded final reproduces the four-buffer `etd_final` value to the CPU FMA reference at the same tolerance (not bit-identical to the GPU `etd_final` kernel, which the backend regroups sub-ULP); the full resident step still matches the CPU solver to 1.52e-15. Buffer-only footprint drops ~387 MiB at 256^3 (6.420 to 6.042 GiB) and ~48 MiB at 128^3.
+
 ## 0.2.0 (2026-04-11)
 
 ### cuFFT GPU backend

@@ -118,9 +118,16 @@ pub struct ResidentSolver {
     /// (~1.27 GiB at N=256), the single change that brings N=256 inside 8 GB.
     omega_phys: [RealBuf<f64>; 3],
 
-    /// ETD stage nonlinear terms `n1, n2, n3, n4`, each three `N`-grid spectral
-    /// components. Allocated once; the nonlinear writes directly into these.
-    stage_n: [[CplxBuf<f64>; 3]; 4],
+    /// ETD stage nonlinear terms, each three `N`-grid spectral components.
+    /// Allocated once; the nonlinear writes directly into these. THREE triples,
+    /// not four: slot 0 holds `n1`, slot 1 holds `n2` (folded in place to
+    /// `n23 = n2 + n3` before the final update), and slot 2 holds `n3` and then
+    /// `n4` (the stage-4 combination consumes `n3` before `n4` overwrites it).
+    /// The fold uses [`CudaBackend::cplx_add_assign`] (a bit-identical `add.f64`)
+    /// and [`CudaBackend::etd_final_folded`] (matches the same CPU FMA reference
+    /// as the four-buffer `etd_final`); the full step still matches the CPU
+    /// solver to 1.52e-15, saving one spectral triple (~0.4 GiB at N=256).
+    stage_n: [[CplxBuf<f64>; 3]; 3],
     /// ETD intermediate state `temp[3]` on the `N` grid.
     temp: [CplxBuf<f64>; 3],
 
@@ -264,7 +271,6 @@ impl ResidentSolver {
             alloc_cplx3(&backend, cplx_len),
             alloc_cplx3(&backend, cplx_len),
             alloc_cplx3(&backend, cplx_len),
-            alloc_cplx3(&backend, cplx_len),
         ];
         let temp = alloc_cplx3(&backend, cplx_len);
         let cfl_scratch = backend.alloc_cplx::<f64>(cplx_len);
@@ -330,8 +336,9 @@ impl ResidentSolver {
     /// Counts the large persistent allocations, all `f64` (8 bytes):
     ///
     /// - `N`-grid complex buffers (`2 * cplx_len` f64 each): `u_hat` (3),
-    ///   `omega_hat` (3), four ETD stage triples (12), `temp` (3) = 21 complex
-    ///   buffers, plus the one padded complex scratch (`2 * pcplx_len` f64).
+    ///   `omega_hat` (3), THREE ETD stage triples (9, the n2+n3 fold removed one),
+    ///   `temp` (3) and the CFL scratch (1) = 19 complex buffers, plus the one
+    ///   padded complex scratch (`2 * pcplx_len` f64).
     /// - padded real buffers (`preal_len` f64 each): `u_phys` (3) and
     ///   `omega_phys` (3) = 6. The cross product writes in place over
     ///   `omega_phys`, so there is NO separate `cross_phys` triple (the packing
@@ -348,8 +355,8 @@ impl ResidentSolver {
     /// analytic estimate against the ACTUAL `cudaMemGetInfo` peak.
     pub fn peak_memory_bytes(&self) -> usize {
         let f64_bytes = std::mem::size_of::<f64>();
-        // u_hat(3) + omega_hat(3) + 4 stage triples(12) + temp(3) + cfl_scratch(1)
-        let cplx_n_buffers = 22;
+        // u_hat(3) + omega_hat(3) + 3 stage triples(9) + temp(3) + cfl_scratch(1)
+        let cplx_n_buffers = 19;
         let n_complex = cplx_n_buffers * 2 * self.cplx_len;
         let padded_complex = 2 * self.pcplx_len; // one padded complex scratch
         let padded_real = 6 * self.preal_len; // u_phys + omega_phys (cross in place)
@@ -386,11 +393,11 @@ impl ResidentSolver {
         self.backend.download_cplx::<f64>(&self.u_hat[c], host);
     }
 
-    /// Downloads nonlinear stage `k` (0..4), component `c`, into a host buffer
+    /// Downloads nonlinear stage `k` (0..3), component `c`, into a host buffer
     /// (diagnostics; counts as one transfer). Stage 0 holds the nonlinear term
     /// of the current `u_hat` after a [`Self::nonlinear`] call.
     pub fn download_stage(&self, k: usize, c: usize, host: &mut [Complex<f64>]) {
-        debug_assert!(k < 4 && c < 3, "stage or component index out of range");
+        debug_assert!(k < 3 && c < 3, "stage or component index out of range");
         self.backend.download_cplx::<f64>(&self.stage_n[k][c], host);
     }
 
@@ -674,30 +681,71 @@ impl ResidentSolver {
     ///
     /// Each `nonlinear(temp)` writes directly into the matching stage buffer; no
     /// device-to-device copy or extra `n_hat` triple is needed. The per-mode
-    /// combinations use the resident `etd_stage_axpy`, `etd_stage4` and
-    /// `etd_final` kernels.
+    /// combinations use the resident `etd_stage_axpy`, `etd_stage4`,
+    /// `cplx_add_assign` and `etd_final_folded` kernels.
+    ///
+    /// # Three stage triples, not four (the n2+n3 fold)
+    ///
+    /// `n2` and `n3` enter the final update only through `(n2 + n3)`, and `n3`'s
+    /// last independent use is the stage-4 combination `2 n3 - n1`. So once
+    /// stage 4 has read `n3`, we fold `n23 = n2 + n3` in place into slot 1 with
+    /// [`CudaBackend::cplx_add_assign`] and reuse slot 2 (which held `n3`) for
+    /// `n4`. The folded final [`CudaBackend::etd_final_folded`] then reads slot 0
+    /// (`n1`), slot 1 (`n23`) and slot 2 (`n4`). The add-assign is a bit-identical
+    /// `add.f64`; the folded final reproduces the same ETD value as the
+    /// four-buffer `etd_final` against the CPU FMA reference (the fork backend may
+    /// regroup the three-term sum sub-ULP between the two kernels, so they are not
+    /// bit-identical to each other). The net effect on the full step is ~1e-22,
+    /// far below the 1.52e-15 the resident step matches the CPU solver to, so the
+    /// fold is a no-op at the validated tolerance while holding one fewer spectral
+    /// triple (~0.4 GiB at N=256). The fold and the `n4` write are enqueued in
+    /// that order on the one stream, so stage 4's read of `n3`, the fold's read of
+    /// `n3`, and `n4`'s overwrite of slot 2 are correctly serialised.
     ///
     /// [`Periodic3D::etd_rk4_step`]: crate::solver::Periodic3D
     pub fn step(&mut self, dt: f64) {
         self.ensure_etd(dt);
 
-        // Stage 1: n1 = nonlinear(u_hat) -> stage 0.
+        // Stage 1: n1 = nonlinear(u_hat) -> slot 0.
         self.nonlinear_into(NlInput::UHat, 0);
 
-        // Stage 2: temp = exp_half * u_hat + dt * a21 * n1.
+        // Stage 2: temp = exp_half * u_hat + dt * a21 * n1; n2 -> slot 1.
         self.stage_axpy(dt, 0);
         self.nonlinear_into(NlInput::Temp, 1);
 
-        // Stage 3: temp = exp_half * u_hat + dt * a21 * n2.
+        // Stage 3: temp = exp_half * u_hat + dt * a21 * n2; n3 -> slot 2.
         self.stage_axpy(dt, 1);
         self.nonlinear_into(NlInput::Temp, 2);
 
-        // Stage 4: temp = exp_full * u_hat + dt * a41 * (2 n3 - n1).
+        // Stage 4: temp = exp_full * u_hat + dt * a41 * (2 n3 - n1) (reads n3 in
+        // slot 2). After this, n3's only remaining use is inside (n2 + n3).
         self.stage4_combine(dt);
-        self.nonlinear_into(NlInput::Temp, 3);
 
-        // Final: u_hat = exp_full * u_hat + dt * (b1 n1 + b23 (n2 + n3) + b4 n4).
-        self.final_update(dt);
+        // Fold n23 = n2 + n3 in place into slot 1 (n3 still resident in slot 2,
+        // already consumed by stage 4 above). This frees slot 2 for n4.
+        self.fold_n23();
+
+        // n4 -> slot 2 (overwrites n3, no longer needed after the fold).
+        self.nonlinear_into(NlInput::Temp, 2);
+
+        // Final: u_hat = exp_full * u_hat + dt * (b1 n1 + b23 n23 + b4 n4).
+        self.final_update_folded(dt);
+    }
+
+    /// Folds `n23 = n2 + n3` in place into stage slot 1, per component, on
+    /// device (`stage_n[1][c] += stage_n[2][c]`). Bit-identical to the
+    /// `(n2 + n3)` add the original `etd_final` performed internally.
+    fn fold_n23(&mut self) {
+        // slot 1 (mutated) and slot 2 (read) are distinct array elements; split
+        // the array so the mutable borrow of slot 1 and the shared borrow of
+        // slot 2 are disjoint without any unsafe. `self.backend` is a separate
+        // field, so borrowing it shared alongside is a disjoint-field borrow.
+        let (lo, hi) = self.stage_n.split_at_mut(2);
+        for c in 0..3 {
+            self.backend
+                .cplx_add_assign::<f64>(&mut lo[1][c], &hi[0][c])
+                .expect("ResidentSolver: n23 fold failed");
+        }
     }
 
     /// Stage 2/3 combination `temp = exp_half * u_hat + dt * a21 * n[stage]`,
@@ -740,13 +788,16 @@ impl ResidentSolver {
         }
     }
 
-    /// Final ETD update `u_hat = exp_full * u_hat + dt * (b1 n1 + b23 (n2 + n3) +
-    /// b4 n4)`, per component, in place on device.
-    fn final_update(&mut self, dt: f64) {
+    /// Folded final ETD update `u_hat = exp_full * u_hat + dt * (b1 n1 + b23 n23
+    /// + b4 n4)`, per component, in place on device, with `n23 = n2 + n3` already
+    /// folded into slot 1 by [`Self::fold_n23`] and `n4` in slot 2. Reproduces the
+    /// same ETD value as the four-buffer `etd_final` against the CPU FMA reference
+    /// (see [`CudaBackend::etd_final_folded`]).
+    fn final_update_folded(&mut self, dt: f64) {
         for c in 0..3 {
             let (u_hat, stage_n) = (&mut self.u_hat, &self.stage_n);
             self.backend
-                .etd_final::<f64>(
+                .etd_final_folded::<f64>(
                     &self.etd_exp_full,
                     &self.etd_b1,
                     &self.etd_b23,
@@ -755,10 +806,9 @@ impl ResidentSolver {
                     &stage_n[0][c],
                     &stage_n[1][c],
                     &stage_n[2][c],
-                    &stage_n[3][c],
                     &mut u_hat[c],
                 )
-                .expect("ResidentSolver: final update failed");
+                .expect("ResidentSolver: folded final update failed");
         }
     }
 
@@ -966,9 +1016,10 @@ mod tests {
         );
 
         // Document the resident-buffer budget at the target grids (no GPU work,
-        // pure arithmetic on the buffer counts; 6 padded real buffers now, since
-        // the cross product is in place over omega_phys). The cuFFT work areas
-        // are reported separately by the resident run via cufftGetSize.
+        // pure arithmetic on the buffer counts; 19 N-grid complex buffers now,
+        // since the n2+n3 fold dropped one ETD stage triple, and 6 padded real
+        // buffers since the cross product is in place over omega_phys). The cuFFT
+        // work areas are reported separately by the resident run via cufftGetSize.
         for &nn in &[128usize, 256] {
             let g = GridSpec::cubic(nn, 2.0 * std::f64::consts::PI);
             let (gsnx, gsny, gsnz) = g.spectral_shape();
@@ -977,7 +1028,7 @@ mod tests {
             let pcplx = pg.nx * pg.ny * (pg.nz / 2 + 1);
             let preal = pg.nx * pg.ny * pg.nz;
             let bytes =
-                (22 * 2 * cplx + 2 * pcplx + 6 * preal + 11 * cplx) * std::mem::size_of::<f64>();
+                (19 * 2 * cplx + 2 * pcplx + 6 * preal + 11 * cplx) * std::mem::size_of::<f64>();
             eprintln!(
                 "resident buffer-only estimate at N={nn}: {:.3} GiB (excl. cuFFT work areas)",
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)

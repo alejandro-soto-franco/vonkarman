@@ -255,6 +255,30 @@ reclaimed about 1.1 GiB that the host-bounce constructor had used. Measured peak
 memory at 256^3 is 6.467 GiB used with 0.893 GiB free. The dt bound is computed on the
 device (a max-reduction), so the step needs no host pull for the CFL condition.
 
+A later pass squeezed the footprint further by folding the ETD-RK4 stage buffers. The
+classical Cox-Matthews final update is `u = E u + dt (b1 n1 + b23 (n2 + n3) + b4 n4)`, and
+`n2`, `n3` enter only through `(n2 + n3)`; `n3`'s last independent use is the stage-4
+combination `2 n3 - n1`. So once stage 4 has read `n3`, the solver folds `n23 = n2 + n3` in
+place (a one-line `add.f64` kernel) and reuses the freed buffer for `n4`, holding three
+spectral stage triples instead of four. Two new kernels do this: `cplx_add_assign` (a
+bit-identical `add.f64`) and `etd_final_folded`. The folded final reproduces the four-buffer
+`etd_final` value against the same CPU FMA reference at the same tolerance; the two GPU kernels
+are NOT bit-identical to each other (the FMA-fork backend may regroup the three-term sum
+sub-ULP), but the difference is ~1e-22 on a full step, so the resident step still matches the
+CPU solver to 1.52e-15, unchanged at the validated tolerance. (Both kernels are written in the
+`#[cuda_module]` Rust source in `kernels/`; the checked-in PTX is regenerated from it by
+`cargo oxide build`, never hand-edited.) The buffer-only footprint drops by three triples: at
+256^3 from 6.420 to 6.042 GiB (about 387 MiB), at 128^3 from 0.806 to 0.758 GiB. This does not
+change the achievable resolution (512^3 f64 still needs ~50 GiB and a bigger card); it buys
+headroom and a leaner solver.
+
+The companion idea, in-place padded cuFFTs to drop the one padded complex scratch (~0.42 GiB),
+was assessed and NOT taken: cuFFT in-place real transforms force the last dimension to be
+padded to `2*(N/2+1)` reals, which puts stride holes in the physical buffers and would break
+the contiguous `cross_product`/`curl` kernels. That is high-risk hand-PTX work on the validated
+cross kernel for a saving that, like the fold, would not change the achievable resolution, so
+the fold is the only memory change made here.
+
 ## Reference solver coverage on this box
 
 See `results/reference_coverage.md` for the full picture. In short: hit3d (Fortran) is
