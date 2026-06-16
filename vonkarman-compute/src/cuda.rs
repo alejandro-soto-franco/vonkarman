@@ -330,4 +330,118 @@ mod tests {
         be.upload_cplx(&host, &mut dev);
         assert!((be.sum_norm_sq::<f64>(&dev) - 100.0).abs() < 1e-12);
     }
+
+    /// FMA-matched CPU oracle for the cross product.
+    ///
+    /// The GPU kernel computes each component as `a * b - c * d`, which the
+    /// fork backend fuses into one `fma.rn.f64`: the second product `c * d` is
+    /// rounded once, then `a * b - (c * d)` is computed with a single rounding.
+    /// To compare against a few ULP rather than papering over a ~1 ULP gap, the
+    /// oracle reproduces that rounding with `f64::mul_add`: `a.mul_add(b, -(c*d))`.
+    #[allow(clippy::too_many_arguments)]
+    fn cross_oracle_fma(
+        ux: &[f64],
+        uy: &[f64],
+        uz: &[f64],
+        ox: &[f64],
+        oy: &[f64],
+        oz: &[f64],
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n = ux.len();
+        let mut cx = vec![0.0; n];
+        let mut cy = vec![0.0; n];
+        let mut cz = vec![0.0; n];
+        for i in 0..n {
+            cx[i] = uy[i].mul_add(oz[i], -(uz[i] * oy[i]));
+            cy[i] = uz[i].mul_add(ox[i], -(ux[i] * oz[i]));
+            cz[i] = ux[i].mul_add(oy[i], -(uy[i] * ox[i]));
+        }
+        (cx, cy, cz)
+    }
+
+    #[test]
+    fn cross_product_matches_cpu_oracle() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+
+        // Deterministic pseudo-random physical fields with non-trivial
+        // mantissas so the fused-vs-unfused rounding actually differs.
+        let n = 4096;
+        let make = |seed: f64| -> Vec<f64> {
+            (0..n)
+                .map(|i| (seed + 0.013 * i as f64).sin() * 1.7 + 0.3)
+                .collect()
+        };
+        let ux = make(0.1);
+        let uy = make(1.3);
+        let uz = make(2.7);
+        let ox = make(3.9);
+        let oy = make(4.2);
+        let oz = make(5.6);
+
+        // GPU path on resident buffers.
+        let dux = be.upload_real::<f64>(&ux);
+        let duy = be.upload_real::<f64>(&uy);
+        let duz = be.upload_real::<f64>(&uz);
+        let dox = be.upload_real::<f64>(&ox);
+        let doy = be.upload_real::<f64>(&oy);
+        let doz = be.upload_real::<f64>(&oz);
+        let mut dcx = be.alloc_real::<f64>(n);
+        let mut dcy = be.alloc_real::<f64>(n);
+        let mut dcz = be.alloc_real::<f64>(n);
+        be.cross_product::<f64>(
+            &dux, &duy, &duz, &dox, &doy, &doz, &mut dcx, &mut dcy, &mut dcz,
+        )
+        .expect("GPU cross_product launch failed");
+        let gcx = be.download_real::<f64>(&dcx);
+        let gcy = be.download_real::<f64>(&dcy);
+        let gcz = be.download_real::<f64>(&dcz);
+
+        // FMA-matched CPU oracle. We use the mul_add oracle (not the plain
+        // twice-rounded ops::cross body) so the tolerance can be tight: the GPU
+        // fuses, so matching the fusion on the CPU isolates real divergence
+        // from a benign ~1 ULP rounding difference.
+        let (ocx, ocy, ocz) = cross_oracle_fma(&ux, &uy, &uz, &ox, &oy, &oz);
+
+        // A few ULP, expressed as a relative tolerance. With the matched oracle
+        // the agreement is essentially bit-exact; 1e-15 leaves head-room for
+        // the handful of points where the driver JIT reorders within the FMA.
+        let tol = 1e-15;
+        for i in 0..n {
+            for (g, o) in [(gcx[i], ocx[i]), (gcy[i], ocy[i]), (gcz[i], ocz[i])] {
+                let rel = (g - o).abs() / o.abs().max(f64::MIN_POSITIVE);
+                assert!(
+                    rel <= tol,
+                    "mismatch at {i}: gpu {g}, oracle {o}, rel {rel:e} > {tol:e}"
+                );
+            }
+        }
+
+        // Cross-check against the plain twice-rounded CPU body too, so the
+        // kernel maths (not just the fusion) is correct. Here the GPU fuses and
+        // the CPU does not, so the gap is one fused-vs-unfused product. Its
+        // magnitude is bounded ABSOLUTELY by ~eps * |product|, not relatively
+        // by the result, which can be tiny under catastrophic cancellation
+        // (e.g. cx ~ 1e-4 differencing two O(1) products). With operands in
+        // roughly [-1.4, 2.0] the products are O(1), so a small multiple of
+        // f64::EPSILON is the right absolute bound; a relative bound on the
+        // cancelled result would spuriously blow up.
+        let mut ccx = vec![0.0; n];
+        let mut ccy = vec![0.0; n];
+        let mut ccz = vec![0.0; n];
+        crate::ops::cross::cross_product_inplace::<f64>(
+            &ux, &uy, &uz, &ox, &oy, &oz, &mut ccx, &mut ccy, &mut ccz,
+        );
+        let abs_tol = 8.0 * f64::EPSILON;
+        for i in 0..n {
+            for (g, c) in [(gcx[i], ccx[i]), (gcy[i], ccy[i]), (gcz[i], ccz[i])] {
+                let abs = (g - c).abs();
+                assert!(
+                    abs <= abs_tol,
+                    "twice-rounded mismatch at {i}: gpu {g}, cpu {c}, abs {abs:e} > {abs_tol:e}"
+                );
+            }
+        }
+    }
 }
