@@ -98,6 +98,76 @@ levers are algorithmic (precision, or a different dealiasing) rather than launch
 Reproduce with `cargo +nightly-2026-04-03 test --release -p vonkarman-periodic --features
 cuda batched_vs_separate_transform_timing -- --ignored --nocapture`.
 
+## Reference-solver wall-clock head-to-head
+
+How fast is vonkarman against independent DNS codes solving the same problem
+(Taylor-Green, Re = 1600) on this box? Two reference solvers run here: hit3d (the
+JHU Fortran pseudo-spectral DNS) and a serial numpy pseudo-spectral DNS in the
+style of spectralDNS. Both reference solvers were measured to be single-threaded
+on this machine (hit3d at 97 percent of one core; the numpy solver under
+`OMP_NUM_THREADS=1`), so this is a best-tool-on-this-box comparison (resident GPU
+versus serial CPU), not a same-hardware one. Both references use the 2/3-rule on
+the N grid and a fixed dt = 0.001 as shipped; vonkarman uses 3/2 padding (a
+1.5x-larger transform grid) and an adaptive ETD-RK4 step. The numbers below are
+reported exactly as measured.
+
+### Per-step throughput
+
+Wall-clock for one integration step (pure stepping; for hit3d and the numpy solver
+this is a 200-step run differenced against a 20-step run to remove one-time setup;
+the references are single measurements, vonkarman is the gamut mean).
+
+| N   | vonkarman resident GPU (ms) | hit3d Fortran, 1 core (ms) | numpy spectral, 1 thread (ms) |
+|-----|-----------------------------|----------------------------|-------------------------------|
+| 64  | 17.27                       | 29.94                      | 148.67                        |
+| 128 | 164.22                      | 101.77                     | 2741.01                       |
+
+Read this with the work-per-step caveat. At N=64 the GPU step is the fastest even
+though it transforms a 96^3 padded grid against hit3d's 64^3. At N=128 hit3d's
+single-core step (102 ms) edges the GPU step (164 ms), but the GPU step is doing
+about 3.4x more FFT points (192^3 versus 128^3, the 3/2 versus 2/3 dealiasing) and
+four nonlinear evaluations per ETD-RK4 step. Per-step parity therefore understates
+the GPU: it does much more work per step.
+
+### Time to solution (to t = 10), N = 64
+
+The honest end-to-end figure folds in the step count. hit3d and the numpy solver
+take 10000 fixed steps of dt = 0.001 to reach t = 10. vonkarman's exponential
+ETD-RK4 integrator treats the stiff viscous term exactly and takes far larger
+stable steps, reaching t = 10 in 219 adaptive steps (measured), each step also
+paying its CFL bound and an occasional ETD-coefficient rebuild.
+
+| solver                       | steps to t = 10 | wall-clock to t = 10 | vs vonkarman |
+|------------------------------|-----------------|----------------------|--------------|
+| vonkarman resident GPU       | 219 (adaptive)  | 37.1 s (measured)    | 1.0x         |
+| hit3d Fortran, 1 core        | 10000 (fixed)   | 299 s (10000 x 29.94 ms) | 8.1x slower |
+| numpy spectral, 1 thread     | 10000 (fixed)   | 1487 s (10000 x 148.67 ms) | 40x slower |
+
+vonkarman reaches t = 10 about 8x faster than the single-core Fortran reference and
+about 40x faster than the serial numpy one at N = 64. The dominant lever is the
+step count (219 versus 10000, a 46x reduction from the exponential integrator),
+partly offset by vonkarman's heavier and adaptively-driven per-step.
+
+A caveat reported honestly, twice over. First, hit3d's dt = 0.001 is its shipped,
+conservative value; an explicit RK code could take a somewhat larger stable step
+and close part of the step-count gap, so the 8x is against the reference as
+configured, not an algorithmic ceiling. Second, vonkarman's own adaptive driver
+recomputes the per-mode ETD coefficients (Kassam-Trefethen contour integrals over
+all modes) whenever the CFL dt drifts more than one percent. During the
+Taylor-Green spin-up dt falls monotonically and crosses that threshold many times,
+and at N = 128 this host-side recompute dominates the time to solution: the full
+to-t = 10 integration there exceeded the measurement budget and is not reported. The
+fixed-dt GPU step throughput (164 ms, above) is unaffected; the adaptive overhead
+is an implementation cost, not a solver-core cost. A cheaper device CFL reduction
+and cached or interpolated ETD coefficients would bring the N >= 128 end-to-end
+wall-clock down to the per-step throughput; that is identified future work and is
+not claimed as done.
+
+Reproduce: vonkarman `cargo +nightly-2026-04-03 test --release -p vonkarman-periodic
+--features cuda resident_walltime_to_t10 -- --ignored --nocapture`; hit3d via a
+bounded run of `benchmarks/hit3d` (differenced ITMAX = 220 minus 20); numpy via the
+`benchmarks/spectraldns` venv stepping the same RK4.
+
 ## Accuracy
 
 Two independent statements.

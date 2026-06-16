@@ -1570,4 +1570,80 @@ mod tests {
             );
         }
     }
+
+    /// End-to-end wall-clock to integrate Taylor-Green Re=1600 to a fixed
+    /// physical time on the resident GPU (ignored; run with `--ignored
+    /// --nocapture`).
+    ///
+    /// This is the time-to-solution number for the reference head-to-head: per-
+    /// step timing alone is misleading because the solvers do different work per
+    /// step (vonkarman's 3/2 padding transforms a 1.5x-larger grid and its
+    /// ETD-RK4 does four nonlinear evaluations, whereas hit3d uses the 2/3-rule
+    /// on the N grid), and crucially they take very different step counts:
+    /// hit3d steps at a fixed dt = 0.001 (10000 steps to t = 10) while this
+    /// solver uses the same adaptive CFL bound as the validated CPU path, taking
+    /// far larger stable ETD-RK4 steps. Integrating to a fixed physical time
+    /// folds both the per-step cost and the step count into one honest figure.
+    ///
+    /// Reports `WALLTIME,N,nsteps,total_s,perstep_ms` at Re = 1600
+    /// (`nu = 1/1600`), matching the reference input exactly.
+    #[test]
+    #[ignore = "GPU wall-clock-to-fixed-time harness; run with --ignored --nocapture"]
+    fn resident_walltime_to_t10() {
+        use crate::Periodic3D;
+        use crate::ic::IcType;
+        use vonkarman_core::domain::Domain;
+        use vonkarman_fft::BackendMode;
+
+        let t_end = 10.0_f64;
+        let nu = 1.0 / 1600.0; // Re = 1600, matching the hit3d reference input.
+        for &n in &[64usize, 128] {
+            let Some(backend) = backend_or_skip() else {
+                return;
+            };
+            let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+
+            // Initial Taylor-Green spectral state from a CPU solver (construction
+            // only; no CPU stepping), then build the resident solver from it.
+            let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+            let u0 = cpu.u_hat();
+            let u_hat_flat = [flat(&u0[0]), flat(&u0[1]), flat(&u0[2])];
+            let mut solver = ResidentSolver::new(backend, grid, nu, &u_hat_flat);
+
+            // Mirror the CPU solver's stepping EXACTLY (see Periodic3D::step): a
+            // CFL bound every step, but the ETD coefficients are recomputed only
+            // when dt drifts by more than 1 percent. Passing the SAME dt to
+            // step() keeps the resident `ensure_etd` cache warm, so we do not pay
+            // the contour-integral recompute on every step (which the CPU path
+            // also avoids via this 1 percent hysteresis).
+            let t0 = std::time::Instant::now();
+            let mut t = 0.0_f64;
+            let mut nsteps = 0u64;
+            let mut cur_dt = solver.cfl_dt(0.5, nu);
+            while t < t_end {
+                let new_dt = solver.cfl_dt(0.5, nu);
+                if (new_dt - cur_dt).abs() / cur_dt.max(1e-30) > 0.01 {
+                    cur_dt = new_dt;
+                }
+                let mut dt = cur_dt;
+                if t + dt > t_end {
+                    dt = t_end - t;
+                }
+                solver.step(dt);
+                t += dt;
+                nsteps += 1;
+                if nsteps > 1_000_000 {
+                    break; // safety valve; never expected to trigger
+                }
+            }
+            // A host-visible query forces the stream to drain so the timer
+            // captures all enqueued work.
+            let _ = solver.mem_get_info();
+            let secs = t0.elapsed().as_secs_f64();
+            eprintln!(
+                "WALLTIME,{n},{nsteps},{secs:.4},{:.4}",
+                1.0e3 * secs / nsteps as f64
+            );
+        }
+    }
 }
