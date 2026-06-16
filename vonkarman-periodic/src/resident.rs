@@ -599,11 +599,39 @@ impl ResidentSolver {
     /// The per-mode coefficients come from `EtdCoeffs::new(lambda * dt)` with
     /// `lambda = -nu * |k|^2`, the same construction as the CPU solver. They are
     /// uploaded as seven real device buffers of length `cplx_len`.
+    ///
+    /// Each `EtdCoeffs::new` is four 32-point Kassam-Trefethen contour integrals
+    /// (about 130 `exp` evaluations per mode), so over `cplx_len` modes this host
+    /// recompute is the dominant cost of an adaptive step whenever `dt` drifts
+    /// (the CFL hysteresis triggers it repeatedly during a Taylor-Green spin-up).
+    /// The modes are independent and the per-mode result is a pure function of
+    /// `lambda * dt`, so the build is parallelised across cores with rayon: the
+    /// values are bit-identical to the serial loop (verified by the CPU-match
+    /// test), only the wall-clock changes. The cheap field unpacking and the
+    /// device uploads stay serial.
     fn ensure_etd(&mut self, dt: f64) {
+        use rayon::prelude::*;
+
         if self.etd_dt == dt {
             return;
         }
         let n = self.cplx_len;
+        // Parallel over the independent modes: this is the expensive part (the
+        // contour integrals). Each closure recomputes `lambda = -nu * |k|^2` then
+        // `EtdCoeffs::new(lambda * dt)`, the exact float operations the serial
+        // loop performed, so the coefficients are identical.
+        let nu = self.nu;
+        let coeffs: Vec<EtdCoeffs> = self
+            .k2_host
+            .par_iter()
+            .map(|&k2| {
+                let lambda = -nu * k2;
+                EtdCoeffs::new(lambda * dt)
+            })
+            .collect();
+
+        // Unpack the seven coefficient fields (cheap, memory-bound) into the
+        // contiguous host vectors the device uploads expect.
         let mut exp_full = Vec::with_capacity(n);
         let mut exp_half = Vec::with_capacity(n);
         let mut a21 = Vec::with_capacity(n);
@@ -611,9 +639,7 @@ impl ResidentSolver {
         let mut b1 = Vec::with_capacity(n);
         let mut b23 = Vec::with_capacity(n);
         let mut b4 = Vec::with_capacity(n);
-        for &k2 in &self.k2_host {
-            let lambda = -self.nu * k2;
-            let ec = EtdCoeffs::new(lambda * dt);
+        for ec in &coeffs {
             exp_full.push(ec.exp_full);
             exp_half.push(ec.exp_half);
             a21.push(ec.a21);
@@ -1597,7 +1623,7 @@ mod tests {
 
         let t_end = 10.0_f64;
         let nu = 1.0 / 1600.0; // Re = 1600, matching the hit3d reference input.
-        for &n in &[64usize, 128] {
+        for &n in &[64usize, 128, 256] {
             let Some(backend) = backend_or_skip() else {
                 return;
             };
