@@ -19,6 +19,7 @@ fn main() {
     let out: String = arg(4, "frames2d".to_string());
     let jet_speed: f64 = arg(5, 2.5);
     let jet_width: f64 = arg(6, 1.0);
+    let white_bg: usize = arg(7, 0); // arg 7: 1 = white background
     std::fs::create_dir_all(&out).expect("create outdir");
 
     // Flow + numerics. dt is advective-CFL safe; viscosity is exact (IF-RK4).
@@ -46,7 +47,7 @@ fn main() {
     for step in 0..=steps {
         if step % stride == 0 {
             let (gold, rust) = sim.dyes();
-            write_dye_png(&gold, &rust, &format!("{out}/f_{frame:05}.png"));
+            write_dye_png(&gold, &rust, &format!("{out}/f_{frame:05}.png"), white_bg != 0);
             frame += 1;
             if frame % 20 == 0 {
                 println!("  frame {frame} (step {step}, {:.0?})", t0.elapsed());

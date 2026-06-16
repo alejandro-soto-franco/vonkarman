@@ -360,13 +360,15 @@ pub fn co_rotating_vortices(
     (spec.forward(&omega), spec.forward(&gold), spec.forward(&rust))
 }
 
-/// Write the two dye densities to a PNG: gold + rust added on black (overlap
-/// blends to orange), with a gamma lift so thin frayed filaments stay visible.
-pub fn write_dye_png(gold: &Array2<f64>, rust: &Array2<f64>, path: &str) {
+/// Write the two dye densities to a PNG. On a black background gold + rust are
+/// added (overlap blends to orange) with a gamma lift so thin frayed filaments
+/// glow. On a white background the dyes composite as translucent inks (opacity
+/// from density), an "ink in water on white paper" look; overlaps tend toward
+/// orange and faint filaments read as light tints.
+pub fn write_dye_png(gold: &Array2<f64>, rust: &Array2<f64>, path: &str, white_bg: bool) {
     let n = gold.shape()[0] as u32;
     let gcol = [1.0_f64, 0.78, 0.23];
     let rcol = [0.72_f64, 0.25, 0.05];
-    let gamma = 0.72;
     let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(n, n);
     for (px, py, p) in img.enumerate_pixels_mut() {
         let i = (n - 1 - py) as usize; // flip y for an upright image
@@ -374,9 +376,19 @@ pub fn write_dye_png(gold: &Array2<f64>, rust: &Array2<f64>, path: &str) {
         let g = gold[[i, j]].max(0.0);
         let r = rust[[i, j]].max(0.0);
         let mut rgb = [0u8; 3];
-        for k in 0..3 {
-            let v = (gcol[k] * g + rcol[k] * r).clamp(0.0, 1.0).powf(gamma);
-            rgb[k] = (v * 255.0).round() as u8;
+        if white_bg {
+            let tot = g + r;
+            let a = tot.min(1.0).powf(0.6); // opacity; lifts faint filaments
+            for k in 0..3 {
+                let ink = if tot > 1e-6 { (gcol[k] * g + rcol[k] * r) / tot } else { 1.0 };
+                let v = (1.0 - a) + ink * a; // composite over white
+                rgb[k] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        } else {
+            for k in 0..3 {
+                let v = (gcol[k] * g + rcol[k] * r).clamp(0.0, 1.0).powf(0.72);
+                rgb[k] = (v * 255.0).round() as u8;
+            }
         }
         *p = Rgb(rgb);
     }
