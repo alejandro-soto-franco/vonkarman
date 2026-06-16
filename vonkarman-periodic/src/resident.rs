@@ -825,4 +825,101 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn resident_etd_rk4_step_matches_cpu_to_1e_12() {
+        use crate::Periodic3D;
+        use crate::ic::IcType;
+        use vonkarman_core::domain::Domain;
+        use vonkarman_fft::BackendMode;
+
+        let Some(backend) = backend_or_skip() else {
+            return;
+        };
+
+        let n = 32;
+        let nu = 0.01;
+        let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+
+        // CPU reference solver from the Taylor-Green IC. Its construction sets dt
+        // from CFL and builds the matching ETD coefficients; the first
+        // Domain::step keeps that dt (the adaptive check sees no change on step
+        // 0) and performs exactly one etd_rk4_step. We read u_hat and dt at
+        // construction, build the resident solver from the SAME state and dt,
+        // then step both once and compare.
+        let mut cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let dt = cpu.dt();
+
+        // Snapshot the construction-time spectral velocity (C-order flatten) for
+        // the resident solver's initial state.
+        let u0 = cpu.u_hat();
+        let u_hat_flat = [flat(&u0[0]), flat(&u0[1]), flat(&u0[2])];
+
+        let mut solver = ResidentSolver::new(backend, grid, nu, &u_hat_flat);
+
+        // One CPU step (single ETD-RK4 step at the construction dt).
+        cpu.step();
+        // Confirm the CPU kept the construction dt (no adaptive recompute on the
+        // first step), so the GPU step at `dt` is the matching single step.
+        assert_eq!(cpu.dt(), dt, "CPU adaptively changed dt on step 0");
+
+        // One resident GPU step at the SAME dt. Bracket the transfer counter: the
+        // ETD coefficient upload happens inside (7 buffers) on the first dt, and
+        // the step itself must do no other transfers.
+        let before = solver.backend().transfer_count();
+        solver.step(dt);
+        let after_step = solver.backend().transfer_count();
+        // The only transfers during step() are the 7 ETD coefficient uploads
+        // (first dt). The physics (curl/pad/scale/cuFFT/cross/truncate/leray/etd)
+        // moves nothing across the bus.
+        assert_eq!(
+            after_step - before,
+            7,
+            "resident step did unexpected transfers: {before} -> {after_step} \
+             (expected exactly the 7 one-off ETD coefficient uploads)"
+        );
+
+        // Compare the stepped GPU u_hat against the CPU reference to 1e-12.
+        let cpu_stepped = cpu.u_hat();
+        let cplx_len = solver.cplx_len();
+        let mut max_rel = 0.0_f64;
+        for c in 0..3 {
+            let mut host = vec![Complex::new(0.0_f64, 0.0); cplx_len];
+            solver.download_u_hat(c, &mut host);
+            let cpu_flat = flat(&cpu_stepped[c]);
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for (g, r) in host.iter().zip(cpu_flat.iter()) {
+                let d = (g - r).norm();
+                num += d * d;
+                den += r.norm_sqr();
+            }
+            let rel = (num / den.max(f64::MIN_POSITIVE)).sqrt();
+            max_rel = max_rel.max(rel);
+        }
+        // The diagnostic downloads (3) are the only further transfers.
+        let after_dl = solver.backend().transfer_count();
+        assert_eq!(
+            after_dl - after_step,
+            3,
+            "expected exactly 3 diagnostic downloads after the step"
+        );
+
+        eprintln!("resident ETD-RK4 step vs CPU: max relative l2 error = {max_rel:e}");
+        assert!(
+            max_rel < 1e-12,
+            "resident ETD-RK4 step relative error {max_rel:e} exceeds 1e-12"
+        );
+
+        // Re-stepping at the SAME dt must NOT re-upload the ETD coefficients
+        // (cached), so a second step does zero transfers of its own.
+        let before2 = solver.backend().transfer_count();
+        solver.step(dt);
+        let after2 = solver.backend().transfer_count();
+        assert_eq!(
+            after2, before2,
+            "a second step at the same dt must reuse cached ETD coefficients \
+             (zero transfers); counter went {before2} -> {after2}"
+        );
+    }
 }
