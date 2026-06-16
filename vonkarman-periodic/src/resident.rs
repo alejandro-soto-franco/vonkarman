@@ -1160,11 +1160,11 @@ mod tests {
     /// Wall-clock timing harness for the resident ETD-RK4 step (ignored by
     /// default; run with `--ignored --nocapture`).
     ///
-    /// Constructs the resident solver from a Taylor-Green state at N = 64 and
-    /// N = 128, times a fixed number of resident `step` calls (after a short
+    /// Constructs the resident solver from a Taylor-Green state at N = 128 and
+    /// N = 256, times a fixed number of resident `step` calls (after a short
     /// warm-up), and reports steps per second at each size. This is the
-    /// before/after measurement for the PTX-module/kernel-handle caching change:
-    /// the numbers are reported exactly as measured.
+    /// before/after measurement for the stream-ordered launch change: the
+    /// numbers are reported exactly as measured.
     #[test]
     #[ignore = "GPU timing harness; run explicitly with --ignored --nocapture"]
     fn resident_step_timing() {
@@ -1173,7 +1173,7 @@ mod tests {
         use vonkarman_core::domain::Domain;
         use vonkarman_fft::BackendMode;
 
-        for &n in &[64usize, 128usize] {
+        for &(n, steps) in &[(128usize, 50usize), (256usize, 20usize)] {
             let Some(backend) = backend_or_skip() else {
                 return;
             };
@@ -1196,7 +1196,6 @@ mod tests {
                 solver.step(dt);
             }
 
-            let steps = 50;
             let t0 = std::time::Instant::now();
             for _ in 0..steps {
                 solver.step(dt);

@@ -123,6 +123,40 @@ impl Functions {
 /// context to the current thread with [`CudaContext::bind_to_thread`] (done in
 /// [`CudaBackend::new`] and again inside every launch helper) before issuing
 /// work from a worker thread.
+///
+/// # Asynchronous, stream-ordered launches
+///
+/// Every operator method (`scale_cplx`, `cross_product`,
+/// `cross_product_inplace_aliased`, `curl`, `leray_project`, `etd_stage_axpy`,
+/// `etd_stage4`, `etd_final`, `copy_cplx`, `spectral_pad`, `spectral_truncate`)
+/// ENQUEUES its kernel on the one backend stream and returns WITHOUT
+/// synchronising. The cuFFT plans are bound to that same stream (see
+/// [`Self::stream_raw`]), so kernels and transforms form one ordered pipeline.
+/// CUDA guarantees same-stream operations execute in issue order, each fully
+/// completing before the next begins, so a kernel that reads a previous
+/// kernel's output observes the correct data with NO host-side synchronise.
+/// This keeps the GPU busy across a whole resident step instead of idling while
+/// the host blocks after each launch.
+///
+/// The consequence for callers: a method returning `Ok(())` means the work is
+/// ENQUEUED, not finished. Device results become HOST-VISIBLE only after the
+/// next synchronisation point, which is one of:
+///
+/// * a download ([`Self::download_real`], [`Self::download_cplx`], or the small
+///   reduction tail in [`Self::sum_norm_sq`] / [`Self::max_speed_sq`]); these go
+///   through `to_host_vec`, which synchronises the stream internally before the
+///   host reads, so the copied data is valid;
+/// * an explicit `self.context().default_stream().synchronize()`.
+///
+/// Uploads ([`Self::upload_real`], [`Self::upload_cplx`]) DO synchronise: the
+/// host->device copy is issued async on the stream but reads the caller's
+/// borrowed host slice, so the stream is synchronised before returning to
+/// guarantee the copy has consumed that memory before the borrow ends.
+///
+/// The resident solver and the GPU-vs-CPU tests download at the end of a step,
+/// so that download's sync makes every preceding enqueued kernel observable and
+/// correctness verification still holds with results bit-identical to the
+/// previously synchronous path.
 #[derive(Debug, Clone)]
 pub struct CudaBackend {
     ctx: Arc<CudaContext>,
@@ -252,7 +286,9 @@ impl CudaBackend {
     /// complex device buffer (one velocity/spectral component).
     ///
     /// Loads the offline-compiled `scale_cplx` kernel from the checked-in PTX
-    /// and launches it on the default stream, then synchronises. `buf` is an
+    /// and enqueues it on the backend stream (stream-ordered, not synchronised
+    /// here; results are host-visible only after a later download or sync).
+    /// `buf` is an
     /// interleaved complex buffer of `n` spectral points (length `2 n`); `s` is
     /// a real scalar applied to both interleaved slots of every element.
     ///
@@ -289,7 +325,7 @@ impl CudaBackend {
         // belongs to the same context; the 3 params alias the live buf (ptr,
         // len) and the scalar `s` in the order the PTX expects; the grid is
         // sized for `2 n` f64 elements and the kernel bounds-checks `i < len`.
-        // Params outlive the call (synchronise below before they drop).
+        // The driver copies the param values during the launch call, so they need not outlive it; the kernel runs stream-ordered and is not synchronised here.
         unsafe {
             launch_kernel_on_stream(
                 &func,
@@ -300,13 +336,19 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// Cross product `c = u x omega`, pointwise over resident device buffers.
     ///
     /// Loads the offline-compiled `cross_product` kernel from the checked-in
-    /// PTX and launches it on the default stream, then synchronises. All nine
+    /// PTX and enqueues it on the backend stream (stream-ordered, not
+    /// synchronised here). All nine
     /// buffers must hold the same number of grid points.
     ///
     /// Mirrors [`crate::ops::cross::cross_product_inplace`]; the GPU fuses each
@@ -384,14 +426,20 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// Aliasing-safe cross product `c = u x omega`, where the outputs `cx`/`cy`/
     /// `cz` MAY ALIAS the omega inputs `ox`/`oy`/`oz` (same device buffers).
     ///
     /// Loads the offline-compiled `cross_product_inplace` kernel and launches it
-    /// on the default stream, then synchronises. The kernel reads all six inputs
+    /// on the backend stream (stream-ordered, not synchronised here). The
+    /// kernel reads all six inputs
     /// for each grid point into registers BEFORE writing any output, so passing
     /// `cx == ox`, `cy == oy`, `cz == oz` is sound: the resident solver uses this
     /// to write the cross result over the vorticity physical buffers and drop the
@@ -478,7 +526,12 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// Queries free and total device memory in bytes via `cudaMemGetInfo`.
@@ -513,7 +566,8 @@ impl CudaBackend {
     /// Spectral curl `omega_hat = i k x u_hat` over resident device buffers.
     ///
     /// Loads the offline-compiled `curl` kernel from the checked-in PTX and
-    /// launches it on the default stream, then synchronises. The velocity
+    /// enqueues it on the backend stream (stream-ordered, not synchronised
+    /// here). The velocity
     /// inputs and vorticity outputs are interleaved complex buffers of `n`
     /// spectral points (length `2 n`); the wavenumbers `kx`/`ky`/`kz` are real
     /// buffers of length `n`, one value per spectral grid point in the same
@@ -591,7 +645,7 @@ impl CudaBackend {
         // belongs to the same context; the 18 params alias live device
         // pointers / lengths in the (ptr, len) order the PTX expects; the grid
         // is sized for `n` grid points and the kernel bounds-checks `i < n`.
-        // Params outlive the call (synchronise below before they drop).
+        // The driver copies the param values during the launch call, so they need not outlive it; the kernel runs stream-ordered and is not synchronised here.
         unsafe {
             launch_kernel_on_stream(
                 &func,
@@ -602,14 +656,20 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// Leray projection `u_hat -= k (k . u_hat) / |k|^2`, in place over resident
     /// device buffers.
     ///
     /// Loads the offline-compiled `leray` kernel from the checked-in PTX and
-    /// launches it on the default stream, then synchronises. The velocity
+    /// enqueues it on the backend stream (stream-ordered, not synchronised
+    /// here). The velocity
     /// components `ux`/`uy`/`uz` are interleaved complex buffers of `n` spectral
     /// points (length `2 n`), modified in place; `kx`/`ky`/`kz` and `k2`
     /// (`= |k|^2`, the value the CPU stores in `k_mag_sq`) are real buffers of
@@ -680,7 +740,7 @@ impl CudaBackend {
         // belongs to the same context; the 14 params alias live device
         // pointers / lengths in the (ptr, len) order the PTX expects; the grid
         // is sized for `n` grid points and the kernel bounds-checks `i < n`.
-        // Params outlive the call (synchronise below before they drop).
+        // The driver copies the param values during the launch call, so they need not outlive it; the kernel runs stream-ordered and is not synchronised here.
         unsafe {
             launch_kernel_on_stream(
                 &func,
@@ -691,14 +751,20 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// ETD-RK4 stage 2 / stage 3 multiply: `out = exp_half * u + dt * a * n`,
     /// out of place, over resident device buffers (one velocity component).
     ///
     /// Loads the offline-compiled `etd_stage_axpy` kernel and launches it on the
-    /// default stream, then synchronises. `exp_half`/`a` are real per-mode
+    /// backend stream (stream-ordered, not synchronised here). `exp_half`/`a`
+    /// are real per-mode
     /// buffers (length `n`); `u`/`n`/`out` are interleaved complex buffers
     /// (length `2 n`). With `a = a21` this is stage 2; with `a = a31`, stage 3.
     ///
@@ -763,8 +829,9 @@ impl CudaBackend {
         // SAFETY: `func` came from a module loaded on `self.ctx`; the stream
         // belongs to the same context; the 11 params alias live device pointers
         // / lengths (and the scalar dt) in the order the PTX expects; the grid
-        // is sized for `n` modes and the kernel bounds-checks `i < n`. Params
-        // outlive the call (synchronise below before they drop).
+        // is sized for `n` modes and the kernel bounds-checks `i < n`. The
+        // driver copies the param values during the launch call, so they need
+        // not outlive it; the kernel runs stream-ordered, not synchronised here.
         unsafe {
             launch_kernel_on_stream(
                 &func,
@@ -775,14 +842,20 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// ETD-RK4 stage 4 multiply: `out = exp_full * u + dt * a41 * (2 n3 - n1)`,
     /// out of place, over resident device buffers (one velocity component).
     ///
     /// Loads the offline-compiled `etd_stage4` kernel and launches it on the
-    /// default stream, then synchronises. `exp_full`/`a41` are real per-mode
+    /// backend stream (stream-ordered, not synchronised here). `exp_full`/`a41`
+    /// are real per-mode
     /// buffers (length `n`); `u`/`n1`/`n3`/`out` are interleaved complex buffers
     /// (length `2 n`).
     ///
@@ -859,7 +932,12 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// ETD-RK4 final update, in place on `u`:
@@ -867,7 +945,8 @@ impl CudaBackend {
     /// device buffers (one velocity component).
     ///
     /// Loads the offline-compiled `etd_final` kernel and launches it on the
-    /// default stream, then synchronises. `exp_full`/`b1`/`b23`/`b4` are real
+    /// backend stream (stream-ordered, not synchronised here).
+    /// `exp_full`/`b1`/`b23`/`b4` are real
     /// per-mode buffers (length `n`); `n1`/`n2`/`n3`/`n4` are interleaved complex
     /// buffers (length `2 n`); `u` (length `2 n`) is read then written in place.
     ///
@@ -965,7 +1044,12 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// On-device compensated reduction of `|z|^2 = re*re + im*im` over an
@@ -1019,8 +1103,9 @@ impl CudaBackend {
             // SAFETY: `func` comes from a module on `self.ctx`; the stream
             // belongs to the same context; the 4 params alias the live (ptr,
             // len) pairs the PTX expects; the grid is sized for `n` complex
-            // elements and the kernel bounds-checks `i < n`. Params outlive the
-            // launch (synchronise below before they drop).
+            // elements and the kernel bounds-checks `i < n`. The driver copies
+            // the param values during the launch call, so they need not outlive
+            // it; the kernel runs stream-ordered, not synchronised here.
             unsafe {
                 launch_kernel_on_stream(
                     &func,
@@ -1032,9 +1117,9 @@ impl CudaBackend {
                 )
                 .expect("sum_norm_sq_device: norm_sq_map launch failed");
             }
-            stream
-                .synchronize()
-                .expect("sum_norm_sq_device: map sync failed");
+            // Stream-ordered: the pairwise reduction below reads this map output
+            // on the same stream, so no host sync here. The final tail
+            // `to_host_vec` synchronises once before the host reads.
         }
 
         // Step 2: pairwise tree reduction, halving the length each pass.
@@ -1073,9 +1158,11 @@ impl CudaBackend {
                 )
                 .expect("sum_norm_sq_device: pairwise_reduce launch failed");
             }
-            stream
-                .synchronize()
-                .expect("sum_norm_sq_device: reduce sync failed");
+            // Stream-ordered: the next pass (or the tail download) reads `next`
+            // on the same stream, so no host sync per pass. Dropping the old
+            // `cur` here frees it via `cuMemFree_v2`, which fully synchronises
+            // the device, so the just-launched read of `cur` has completed
+            // before the memory is released (no use-after-free).
             cur = next;
             cur_len = out_len;
         }
@@ -1097,8 +1184,9 @@ impl CudaBackend {
 
     /// Device-to-device copy `dst = src` of an interleaved-complex buffer.
     ///
-    /// Loads the `copy_cplx` kernel and launches it on the default stream, then
-    /// synchronises. Both buffers are interleaved complex of the same logical
+    /// Loads the `copy_cplx` kernel and enqueues it on the backend stream
+    /// (stream-ordered, not synchronised here). Both buffers are interleaved
+    /// complex of the same logical
     /// length. Used by the resident CFL path to snapshot `u_hat[c]` before the
     /// destructive cuFFT C2R inverse, preserving the primary state.
     pub fn copy_cplx<F: Float>(
@@ -1127,8 +1215,10 @@ impl CudaBackend {
         let cfg = LaunchConfig::for_num_elems(len as u32);
         // SAFETY: `func` from a module on `self.ctx`; same-context stream; the 4
         // params alias the live (ptr, len) pairs the PTX expects; grid sized for
-        // `2 n` f64 elements, kernel bounds-checks `i < len`. Params outlive the
-        // call (synchronise below). src and dst are distinct buffers.
+        // `2 n` f64 elements, kernel bounds-checks `i < len`. The driver copies
+        // the param values during the launch call, so they need not outlive it;
+        // the kernel runs stream-ordered, not synchronised here. src and dst are
+        // distinct buffers.
         unsafe {
             launch_kernel_on_stream(
                 &func,
@@ -1139,7 +1229,12 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// On-device maximum of the squared speed `ux^2 + uy^2 + uz^2` over three
@@ -1204,7 +1299,8 @@ impl CudaBackend {
             // SAFETY: `func` from a module on `self.ctx`; the stream belongs to
             // the same context; the 8 params alias the live (ptr, len) pairs the
             // PTX expects; the grid is sized for `n` points and the kernel
-            // bounds-checks `i < n`. Params outlive the launch (sync below).
+            // bounds-checks `i < n`. The driver copies the param values during
+            // the launch call, so they need not outlive it; stream-ordered.
             unsafe {
                 launch_kernel_on_stream(
                     &func,
@@ -1216,7 +1312,9 @@ impl CudaBackend {
                 )
                 .expect("max_speed_sq: speed_sq_map launch failed");
             }
-            stream.synchronize().expect("max_speed_sq: map sync failed");
+            // Stream-ordered: the pairwise max below reads this map output on the
+            // same stream, so no host sync here. The tail `to_host_vec`
+            // synchronises once before the host reads.
         }
 
         // Step 2: pairwise tree MAX, halving the length each pass.
@@ -1254,9 +1352,11 @@ impl CudaBackend {
                 )
                 .expect("max_speed_sq: pairwise_max launch failed");
             }
-            stream
-                .synchronize()
-                .expect("max_speed_sq: reduce sync failed");
+            // Stream-ordered: the next pass (or the tail download) reads `next`
+            // on the same stream, so no host sync per pass. Dropping the old
+            // `cur` here frees it via `cuMemFree_v2`, which fully synchronises
+            // the device, so the just-launched read of `cur` has completed
+            // before the memory is released (no use-after-free).
             cur = next;
             cur_len = out_len;
         }
@@ -1278,7 +1378,8 @@ impl CudaBackend {
     /// buffers (pure index remap, no scaling).
     ///
     /// Loads the offline-compiled `spectral_pad` kernel and launches it on the
-    /// default stream, then synchronises. `src` is an interleaved complex buffer
+    /// backend stream (stream-ordered, not synchronised here). `src` is an
+    /// interleaved complex buffer
     /// of shape `(snx, sny, snz)` (length `2 snx sny snz`); `dst` is an
     /// interleaved complex buffer of shape `(dnx, dny, dnz)` (length
     /// `2 dnx dny dnz`). `nx`/`ny` are the original `N`-grid extents.
@@ -1347,8 +1448,9 @@ impl CudaBackend {
         // to the same context; the 12 params alias the live src (ptr, len), the
         // scalar dims, and the dst (ptr, len) in the order the PTX expects; the
         // grid is sized for the source point count and the kernel bounds-checks
-        // `i < snx*sny*snz`. `dst` is pre-zeroed by the caller. Params outlive
-        // the launch (synchronise below before they drop).
+        // `i < snx*sny*snz`. `dst` is pre-zeroed by the caller. The driver
+        // copies the param values during the launch call, so they need not
+        // outlive it; the kernel runs stream-ordered, not synchronised here.
         unsafe {
             launch_kernel_on_stream(
                 &func,
@@ -1359,14 +1461,20 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// Spectral truncate gather for 3/2 dealiasing, over resident device
     /// buffers (pure index remap, no scaling).
     ///
-    /// Loads the offline-compiled `spectral_truncate` kernel and launches it on
-    /// the default stream, then synchronises. `src` is an interleaved complex
+    /// Loads the offline-compiled `spectral_truncate` kernel and enqueues it on
+    /// the backend stream (stream-ordered, not synchronised here). `src` is an
+    /// interleaved complex
     /// buffer of shape `(snx, sny, snz)`; `dst` is an interleaved complex buffer
     /// of shape `(dnx, dny, dnz)`. `nx`/`ny` are the original `N`-grid extents.
     ///
@@ -1442,7 +1550,12 @@ impl CudaBackend {
                 &mut params,
             )?;
         }
-        stream.synchronize()
+        // Stream-ordered launch: the kernel is enqueued on the backend stream
+        // and is NOT synchronised here. CUDA guarantees same-stream operations
+        // run in issue order, so a later op that reads this output observes it
+        // without a host sync. Results become host-visible only after a
+        // download or an explicit sync (see the CudaBackend type docs).
+        Ok(())
     }
 
     /// Reinterprets a generic `F` value as `f64` for the f64-only GPU path.
