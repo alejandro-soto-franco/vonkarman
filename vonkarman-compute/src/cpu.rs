@@ -79,9 +79,7 @@ mod tests {
     #[test]
     fn cpu_sum_norm_sq_matches_kahan() {
         let be = CpuBackend::new();
-        let host: Vec<Complex<f64>> = (1..=1000)
-            .map(|k| Complex::new(k as f64, 0.0))
-            .collect();
+        let host: Vec<Complex<f64>> = (1..=1000).map(|k| Complex::new(k as f64, 0.0)).collect();
         let mut buf = be.alloc_cplx::<f64>(host.len());
         be.upload_cplx(&host, &mut buf);
         // sum_{k=1}^{1000} k^2 = 333_833_500
