@@ -17,6 +17,8 @@ fn main() {
     let steps: usize = arg(2, 18000);
     let stride: usize = arg(3, 90);
     let out: String = arg(4, "frames2d".to_string());
+    let jet_speed: f64 = arg(5, 2.5);
+    let jet_width: f64 = arg(6, 1.0);
     std::fs::create_dir_all(&out).expect("create outdir");
 
     // Flow + numerics. dt is advective-CFL safe; viscosity is exact (IF-RK4).
@@ -31,6 +33,12 @@ fn main() {
     let spec = Spectral2D::new(n);
     let (wh, gh, rh) = co_rotating_vortices(&spec, sep, core, circ, noise, seed);
     let mut sim = Sim::new(spec, wh, gh, rh, dt, nu, kappa);
+    // Steady downward jet: a rectangular vertical strip through the centre that
+    // cuts top-to-bottom through the red and yellow dye (dye-only, so it streaks
+    // the colours without tearing the vortices apart). args 5,6 = speed,width.
+    if jet_speed > 0.0 {
+        sim.set_jet(std::f64::consts::PI, jet_width, jet_speed);
+    }
 
     println!("vonkarman-2d: n={n} steps={steps} stride={stride} dt={dt:.2e} -> {out}/");
     let t0 = Instant::now();

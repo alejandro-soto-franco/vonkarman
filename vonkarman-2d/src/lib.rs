@@ -171,6 +171,10 @@ pub struct Sim {
     ew2: Array2<f64>,
     ec: Array2<f64>,
     ec2: Array2<f64>,
+    /// Steady prescribed downward jet velocity (physical, `n x n`, the `v`
+    /// component) added to the advecting velocity. A divergence-free curtain
+    /// `v = v(x)` in a vertical strip that cuts through the dye top-to-bottom.
+    v_jet: Array2<f64>,
 }
 
 impl Sim {
@@ -187,7 +191,29 @@ impl Sim {
         let ew2 = integ_factor(&spec, nu, dt * 0.5);
         let ec = integ_factor(&spec, kappa, dt);
         let ec2 = integ_factor(&spec, kappa, dt * 0.5);
-        Self { spec, wh, gh, rh, dt, ew, ew2, ec, ec2 }
+        let n = spec.n();
+        let v_jet = Array2::<f64>::zeros((n, n));
+        Self { spec, wh, gh, rh, dt, ew, ew2, ec, ec2, v_jet }
+    }
+
+    /// Set a steady downward jet: a smooth top-hat vertical strip of width
+    /// `width` centred at `centre` (in `x`), full height, flowing down at
+    /// `speed`. Added to the advecting velocity, so it drags vorticity and dye
+    /// downward where it passes, cutting a swath through the swirl. `v = v(x)`
+    /// is divergence-free, so it needs no pressure correction.
+    pub fn set_jet(&mut self, centre: f64, width: f64, speed: f64) {
+        let n = self.spec.n();
+        let dx = std::f64::consts::TAU / n as f64;
+        let edge = 0.12; // smoothing width of the strip walls
+        let (lo, hi) = (centre - 0.5 * width, centre + 0.5 * width);
+        for i in 0..n {
+            let x = i as f64 * dx;
+            // smooth top-hat in x: 1 inside the strip, 0 outside
+            let th = 0.5 * (((x - lo) / edge).tanh() - ((x - hi) / edge).tanh());
+            for j in 0..n {
+                self.v_jet[[i, j]] = -speed * th; // downward (-y)
+            }
+        }
     }
 
     /// One IF-RK4 step for vorticity + the two dyes, sharing one velocity per
@@ -196,10 +222,16 @@ impl Sim {
     pub fn step(&mut self) {
         let dt = self.dt;
         let s = &self.spec;
-        // nonlinear RHS for all three fields from one velocity (the stage omega)
+        let vjet = &self.v_jet;
+        // Nonlinear RHS from one velocity per stage. The steady jet is added to
+        // the DYE advection only (not the vorticity), so the vortices keep their
+        // true orbit-and-fray dynamics while the jet drags the colours downward
+        // in its strip, cutting a vertical streak through the swirl.
         let rhs = |w: &Array2<C>, g: &Array2<C>, r: &Array2<C>| {
             let (u, v) = s.velocity(w);
-            (s.advect(w, &u, &v), s.advect(g, &u, &v), s.advect(r, &u, &v))
+            let mut vd = v.clone();
+            Zip::from(&mut vd).and(vjet).for_each(|vd, &vj| *vd += vj);
+            (s.advect(w, &u, &v), s.advect(g, &u, &vd), s.advect(r, &u, &vd))
         };
         // per-field stage builders (E = field's integrating factor)
         let st2 = |e2: &Array2<f64>, base: &Array2<C>, k: &Array2<C>| {
