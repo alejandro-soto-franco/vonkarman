@@ -17,7 +17,9 @@
 //! [`CplxBuf::buf`]'s device pointer.
 
 use crate::ptx;
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig, launch_kernel_on_stream};
+use cuda_core::{
+    CudaContext, CudaFunction, CudaModule, DeviceBuffer, LaunchConfig, launch_kernel_on_stream,
+};
 use num_complex::Complex;
 use std::any::TypeId;
 use std::ffi::c_void;
@@ -51,6 +53,70 @@ pub struct CplxBuf<F> {
 unsafe impl<F: Send> Send for RealBuf<F> {}
 unsafe impl<F: Send> Send for CplxBuf<F> {}
 
+/// The PTX module loaded once, plus every kernel function handle resolved once.
+///
+/// The kernels live in a single offline-compiled PTX image
+/// ([`ptx::KERNELS`]). Loading that module and resolving each `CUfunction`
+/// goes through the driver JIT and is expensive (tens of milliseconds), so it
+/// must happen ONCE at backend construction, not on every launch. Each launch
+/// helper then clones the relevant cached [`CudaFunction`] (an `Arc` bump) and
+/// launches it.
+///
+/// `_module` is kept alive so the function handles (which the kernels reference
+/// by raw `CUfunction`) stay valid for the backend's lifetime. Each
+/// [`CudaFunction`] also holds its own `Arc<CudaModule>`, so the module would
+/// outlive them regardless; the explicit field documents the intent.
+///
+/// All fields are `CudaFunction` / `Arc<CudaModule>`, both of which cuda-core
+/// marks `Send + Sync` (handles are valid on any thread that has the owning
+/// context bound, which every launch helper ensures via the stream's context),
+/// so `Functions` is `Send + Sync` and `CudaBackend` stays `Send + Sync`.
+#[derive(Debug, Clone)]
+struct Functions {
+    /// The loaded PTX module, retained for the backend's lifetime.
+    _module: Arc<CudaModule>,
+    cross_product: CudaFunction,
+    cross_product_inplace: CudaFunction,
+    curl: CudaFunction,
+    leray: CudaFunction,
+    etd_stage_axpy: CudaFunction,
+    etd_stage4: CudaFunction,
+    etd_final: CudaFunction,
+    scale_cplx: CudaFunction,
+    spectral_pad: CudaFunction,
+    spectral_truncate: CudaFunction,
+    norm_sq_map: CudaFunction,
+    pairwise_reduce: CudaFunction,
+    speed_sq_map: CudaFunction,
+    pairwise_max: CudaFunction,
+    copy_cplx: CudaFunction,
+}
+
+impl Functions {
+    /// Loads the kernel PTX module once and resolves every kernel handle once.
+    fn load(ctx: &Arc<CudaContext>) -> Result<Self, cuda_core::DriverError> {
+        let module = ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        Ok(Self {
+            cross_product: module.load_function("cross_product")?,
+            cross_product_inplace: module.load_function("cross_product_inplace")?,
+            curl: module.load_function("curl")?,
+            leray: module.load_function("leray")?,
+            etd_stage_axpy: module.load_function("etd_stage_axpy")?,
+            etd_stage4: module.load_function("etd_stage4")?,
+            etd_final: module.load_function("etd_final")?,
+            scale_cplx: module.load_function("scale_cplx")?,
+            spectral_pad: module.load_function("spectral_pad")?,
+            spectral_truncate: module.load_function("spectral_truncate")?,
+            norm_sq_map: module.load_function("norm_sq_map")?,
+            pairwise_reduce: module.load_function("pairwise_reduce")?,
+            speed_sq_map: module.load_function("speed_sq_map")?,
+            pairwise_max: module.load_function("pairwise_max")?,
+            copy_cplx: module.load_function("copy_cplx")?,
+            _module: module,
+        })
+    }
+}
+
 /// GPU compute backend.
 ///
 /// Holds the device primary context. Cheap to clone (an `Arc` bump). Bind the
@@ -60,6 +126,10 @@ unsafe impl<F: Send> Send for CplxBuf<F> {}
 #[derive(Debug, Clone)]
 pub struct CudaBackend {
     ctx: Arc<CudaContext>,
+    /// The PTX module and every kernel handle, loaded ONCE at construction and
+    /// reused across all launches. Shared (`Arc`) so a cloned backend reuses
+    /// the same loaded module rather than re-JITing.
+    funcs: Arc<Functions>,
     /// Count of host<->device transfers issued through the backend's upload and
     /// download methods (`upload_real`/`download_real`/`upload_cplx`/
     /// `download_cplx`), the ONLY points that move data across the bus. Shared
@@ -87,8 +157,13 @@ impl CudaBackend {
     pub fn new(ordinal: usize) -> Result<Self, cuda_core::DriverError> {
         let ctx = CudaContext::new(ordinal)?;
         ctx.bind_to_thread()?;
+        // Load the kernel PTX module and resolve every function handle ONCE
+        // here; the launch helpers reuse these cached handles rather than
+        // re-JITing the module on every launch.
+        let funcs = Arc::new(Functions::load(&ctx)?);
         Ok(Self {
             ctx,
+            funcs,
             transfers: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -193,8 +268,9 @@ impl CudaBackend {
         let len = buf.buf.len();
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("scale_cplx")?;
+        // Cached handle (Arc bump); the PTX module is loaded once at
+        // construction, not re-JITed per launch.
+        let func = self.funcs.scale_cplx.clone();
 
         // Param order matches the kernel: buf (ptr, len), then the scalar s.
         let mut p_buf = buf.buf.cu_deviceptr();
@@ -268,8 +344,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("cross_product")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.cross_product.clone();
 
         // Each &[f64] / DisjointSlice<f64> kernel param lowers to a (ptr, len)
         // pair, in source order: ux, uy, uz, ox, oy, oz, cx, cy, cz.
@@ -363,8 +439,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("cross_product_inplace")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.cross_product_inplace.clone();
 
         // Param order matches the kernel: ux, uy, uz, ox, oy, oz, cx, cy, cz,
         // each &[f64] / DisjointSlice<f64> lowering to a (ptr, len) pair.
@@ -474,8 +550,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("curl")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.curl.clone();
 
         // Param order matches the kernel signature: ux, uy, uz, kx, ky, kz,
         // ox, oy, oz. Each &[f64] / DisjointSlice<f64> lowers to a (ptr, len)
@@ -567,8 +643,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("leray")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.leray.clone();
 
         // Param order matches the kernel signature: kx, ky, kz, k2, ux, uy, uz.
         // Each &[f64] / DisjointSlice<f64> lowers to a (ptr, len) pair. The
@@ -650,8 +726,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("etd_stage_axpy")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.etd_stage_axpy.clone();
 
         // Param order matches the kernel: exp_half, a, dt, u, n, out. The slice
         // params each lower to a (ptr, len) pair; the scalar `dt` is a single
@@ -736,8 +812,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("etd_stage4")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.etd_stage4.clone();
 
         // Param order matches the kernel: exp_full, a41, dt, u, n1, n3, out.
         let mut p_exp_full = exp_full.buf.cu_deviceptr();
@@ -828,8 +904,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("etd_final")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.etd_final.clone();
 
         // Param order matches the kernel:
         // exp_full, b1, b23, b4, dt, n1, n2, n3, n4, u.
@@ -922,18 +998,13 @@ impl CudaBackend {
         }
 
         let stream = self.ctx.default_stream();
-        let module = self
-            .ctx
-            .load_module_from_ptx_src(ptx::KERNELS)
-            .expect("sum_norm_sq_device: module load failed");
 
         // Step 1: map |z|^2 into a real device buffer of length n.
         let mut cur = DeviceBuffer::<f64>::zeroed(&stream, n)
             .expect("sum_norm_sq_device: map buffer alloc failed");
         {
-            let func = module
-                .load_function("norm_sq_map")
-                .expect("sum_norm_sq_device: norm_sq_map not found");
+            // Cached handle (Arc bump); module loaded once at construction.
+            let func = self.funcs.norm_sq_map.clone();
             let mut p_in = buf.buf.cu_deviceptr();
             let mut l_in = (2 * n) as u64;
             let mut p_out = cur.cu_deviceptr();
@@ -967,9 +1038,8 @@ impl CudaBackend {
         }
 
         // Step 2: pairwise tree reduction, halving the length each pass.
-        let reduce = module
-            .load_function("pairwise_reduce")
-            .expect("sum_norm_sq_device: pairwise_reduce not found");
+        // Cached handle (Arc bump); module loaded once at construction.
+        let reduce = self.funcs.pairwise_reduce.clone();
         let mut cur_len = n;
         while cur_len > TAIL {
             let out_len = cur_len.div_ceil(2);
@@ -1041,8 +1111,8 @@ impl CudaBackend {
         debug_assert_eq!(dst.buf.len(), len, "copy_cplx: src and dst length mismatch");
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("copy_cplx")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.copy_cplx.clone();
 
         let mut p_src = src.buf.cu_deviceptr();
         let mut l_src = len as u64;
@@ -1105,18 +1175,13 @@ impl CudaBackend {
         }
 
         let stream = self.ctx.default_stream();
-        let module = self
-            .ctx
-            .load_module_from_ptx_src(ptx::KERNELS)
-            .expect("max_speed_sq: module load failed");
 
         // Step 1: map ux^2 + uy^2 + uz^2 into a real device buffer of length n.
         let mut cur =
             DeviceBuffer::<f64>::zeroed(&stream, n).expect("max_speed_sq: map buffer alloc failed");
         {
-            let func = module
-                .load_function("speed_sq_map")
-                .expect("max_speed_sq: speed_sq_map not found");
+            // Cached handle (Arc bump); module loaded once at construction.
+            let func = self.funcs.speed_sq_map.clone();
             let mut p_ux = ux.buf.cu_deviceptr();
             let mut l_ux = n as u64;
             let mut p_uy = uy.buf.cu_deviceptr();
@@ -1155,9 +1220,8 @@ impl CudaBackend {
         }
 
         // Step 2: pairwise tree MAX, halving the length each pass.
-        let reduce = module
-            .load_function("pairwise_max")
-            .expect("max_speed_sq: pairwise_max not found");
+        // Cached handle (Arc bump); module loaded once at construction.
+        let reduce = self.funcs.pairwise_max.clone();
         let mut cur_len = n;
         while cur_len > TAIL {
             let out_len = cur_len.div_ceil(2);
@@ -1244,8 +1308,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("spectral_pad")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.spectral_pad.clone();
 
         // Param order matches the kernel: src (ptr, len), then the scalar dims
         // snx, sny, snz, dny, dnz, nx, ny, dnx, then dst (ptr, len).
@@ -1330,8 +1394,8 @@ impl CudaBackend {
         );
 
         let stream = self.ctx.default_stream();
-        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
-        let func = module.load_function("spectral_truncate")?;
+        // Cached handle (Arc bump); module loaded once at construction.
+        let func = self.funcs.spectral_truncate.clone();
 
         // Param order matches the kernel: src (ptr, len), then the scalar dims
         // snx, sny, snz, dny, dnz, nx, ny, dnx, then dst (ptr, len).

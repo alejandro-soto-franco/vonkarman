@@ -1156,4 +1156,59 @@ mod tests {
              (zero transfers); counter went {before2} -> {after2}"
         );
     }
+
+    /// Wall-clock timing harness for the resident ETD-RK4 step (ignored by
+    /// default; run with `--ignored --nocapture`).
+    ///
+    /// Constructs the resident solver from a Taylor-Green state at N = 64 and
+    /// N = 128, times a fixed number of resident `step` calls (after a short
+    /// warm-up), and reports steps per second at each size. This is the
+    /// before/after measurement for the PTX-module/kernel-handle caching change:
+    /// the numbers are reported exactly as measured.
+    #[test]
+    #[ignore = "GPU timing harness; run explicitly with --ignored --nocapture"]
+    fn resident_step_timing() {
+        use crate::Periodic3D;
+        use crate::ic::IcType;
+        use vonkarman_core::domain::Domain;
+        use vonkarman_fft::BackendMode;
+
+        for &n in &[64usize, 128usize] {
+            let Some(backend) = backend_or_skip() else {
+                return;
+            };
+
+            let nu = 0.01;
+            let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+
+            // Take an initial Taylor-Green spectral state and its CFL dt from a
+            // CPU solver, then build the resident solver from the same state.
+            let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+            let dt = cpu.dt();
+            let u0 = cpu.u_hat();
+            let u_hat_flat = [flat(&u0[0]), flat(&u0[1]), flat(&u0[2])];
+            let mut solver = ResidentSolver::new(backend, grid, nu, &u_hat_flat);
+
+            // Warm-up (also triggers the one-off ETD coefficient upload at this
+            // dt) so the timed loop measures only steady-state stepping.
+            let warmup = 5;
+            for _ in 0..warmup {
+                solver.step(dt);
+            }
+
+            let steps = 50;
+            let t0 = std::time::Instant::now();
+            for _ in 0..steps {
+                solver.step(dt);
+            }
+            let elapsed = t0.elapsed();
+            let secs = elapsed.as_secs_f64();
+            let per_step_ms = 1.0e3 * secs / steps as f64;
+            let steps_per_s = steps as f64 / secs;
+            eprintln!(
+                "resident step timing N={n}: {steps} steps in {secs:.4} s \
+                 => {per_step_ms:.3} ms/step, {steps_per_s:.3} steps/s"
+            );
+        }
+    }
 }
