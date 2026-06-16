@@ -13,3 +13,16 @@ ndarray = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
+
+# Compute backends (CPU/GPU). Optional: only the GPU-resident SpectralState path
+# and its residency test need it, behind the `cuda` feature. The default build
+# stays pure-CPU and toolkit-free (SpectralState compiles over any
+# ComputeBackend, which lives in vonkarman-core).
+vonkarman-compute = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables the GPU-resident SpectralState round trip (cuFFT on cuda-core buffers)
+# and the residency test. Pulls in vonkarman-compute with its `cuda` feature,
+# which adds the compile-time CUDA toolkit dependency; off by default.
+cuda = ["dep:vonkarman-compute", "vonkarman-compute/cuda"]

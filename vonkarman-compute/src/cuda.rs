@@ -20,7 +20,9 @@ use crate::ptx;
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig, launch_kernel_on_stream};
 use num_complex::Complex;
 use std::any::TypeId;
+use std::ffi::c_void;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use vonkarman_core::{ComputeBackend, float::Float};
 
 /// A real device buffer of `f64` scalars.
@@ -58,6 +60,12 @@ unsafe impl<F: Send> Send for CplxBuf<F> {}
 #[derive(Debug, Clone)]
 pub struct CudaBackend {
     ctx: Arc<CudaContext>,
+    /// Count of host<->device transfers issued through the backend's upload and
+    /// download methods (`upload_real`/`download_real`/`upload_cplx`/
+    /// `download_cplx`), the ONLY points that move data across the bus. Shared
+    /// (`Arc`) so clones of the backend observe one counter; used by the
+    /// residency proof to assert a resident FFT round trip copies nothing.
+    transfers: Arc<AtomicU64>,
 }
 
 /// Asserts at runtime that the generic `F` is `f64`, the only precision the
@@ -79,12 +87,61 @@ impl CudaBackend {
     pub fn new(ordinal: usize) -> Result<Self, cuda_core::DriverError> {
         let ctx = CudaContext::new(ordinal)?;
         ctx.bind_to_thread()?;
-        Ok(Self { ctx })
+        Ok(Self {
+            ctx,
+            transfers: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     /// Borrows the owned CUDA context (for cuFFT plan creation later).
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
+    }
+
+    /// Raw device pointer of a resident complex buffer, as `*mut f64`.
+    ///
+    /// The buffer is interleaved `[re, im, ...]` of length `2 * buf.len` `f64`s,
+    /// which is the layout cuFFT's complex transforms read and write directly.
+    /// Hand this to [`vonkarman_fft::CufftBackend::r2c_3d_dev`] /
+    /// [`vonkarman_fft::CufftBackend::c2r_3d_dev`] to run an FFT in place on the
+    /// resident buffer with no host transfer.
+    ///
+    /// The pointer is owned by `buf` and stays valid only while `buf` lives in
+    /// this backend's primary context; do not free or move `buf` while a
+    /// transform using the pointer is in flight.
+    pub fn cplx_device_ptr(&self, buf: &CplxBuf<f64>) -> *mut f64 {
+        buf.buf.cu_deviceptr() as *mut f64
+    }
+
+    /// Raw device pointer of a resident real buffer, as `*mut f64`.
+    ///
+    /// Length `buf.buf.len()` `f64`s. The companion of [`Self::cplx_device_ptr`]
+    /// for the real side of a cuFFT transform; same validity rules.
+    pub fn real_device_ptr(&self, buf: &RealBuf<f64>) -> *mut f64 {
+        buf.buf.cu_deviceptr() as *mut f64
+    }
+
+    /// Raw `CUstream` handle of this backend's stream, as `*mut c_void`, for
+    /// [`vonkarman_fft::CufftBackend::set_stream`].
+    ///
+    /// The backend issues all kernels on the context default stream, whose raw
+    /// handle is null (the driver interprets null as the default stream). Binding
+    /// the cuFFT plans to this same handle keeps the FFT and the pointwise
+    /// operators on one ordered stream in the shared primary context, so no
+    /// cross-stream synchronisation is needed between them.
+    pub fn stream_raw(&self) -> *mut c_void {
+        self.ctx.default_stream().cu_stream() as *mut c_void
+    }
+
+    /// Number of host<->device transfers issued so far (the residency proof).
+    ///
+    /// Incremented once per upload/download (`upload_real`, `download_real`,
+    /// `upload_cplx`, `download_cplx`), the only methods that move data across
+    /// the PCIe bus. A resident FFT round trip issues no such call, so a test can
+    /// bracket the round trip and assert the count rose by exactly the setup
+    /// upload plus the final download.
+    pub fn transfer_count(&self) -> u64 {
+        self.transfers.load(Ordering::Relaxed)
     }
 
     /// Uploads a host real field into a fresh device [`RealBuf`].
@@ -93,6 +150,7 @@ impl CudaBackend {
     /// is ready for a launch on the default stream.
     pub fn upload_real<F: Float>(&self, host: &[f64]) -> RealBuf<F> {
         assert_f64::<F>();
+        self.transfers.fetch_add(1, Ordering::Relaxed);
         let stream = self.ctx.default_stream();
         let buf = DeviceBuffer::<f64>::from_host(&stream, host)
             .expect("CudaBackend::upload_real device copy failed");
@@ -108,6 +166,7 @@ impl CudaBackend {
     /// Downloads a device [`RealBuf`] into a host `Vec<f64>` (f64-only).
     pub fn download_real<F: Float>(&self, src: &RealBuf<F>) -> Vec<f64> {
         assert_f64::<F>();
+        self.transfers.fetch_add(1, Ordering::Relaxed);
         let stream = self.ctx.default_stream();
         src.buf
             .to_host_vec(&stream)
@@ -1003,6 +1062,7 @@ impl ComputeBackend for CudaBackend {
 
     fn upload_cplx<F: Float>(&self, host: &[Complex<F>], dst: &mut Self::CplxBuf<F>) {
         assert_f64::<F>();
+        self.transfers.fetch_add(1, Ordering::Relaxed);
         debug_assert_eq!(host.len(), dst.len, "upload length mismatch");
         // Complex<f64> is #[repr(C)] of two f64, so the host slice is already
         // the interleaved [re, im, ...] f64 layout the device buffer expects.
@@ -1021,6 +1081,7 @@ impl ComputeBackend for CudaBackend {
 
     fn download_cplx<F: Float>(&self, src: &Self::CplxBuf<F>, host: &mut [Complex<F>]) {
         assert_f64::<F>();
+        self.transfers.fetch_add(1, Ordering::Relaxed);
         debug_assert_eq!(host.len(), src.len, "download length mismatch");
         let stream = self.ctx.default_stream();
         let flat = src

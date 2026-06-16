@@ -18,6 +18,7 @@ repository = "https://github.com/alejandro-soto-franco/vonkarman"
 
 [workspace.dependencies]
 vonkarman-core = { path = "vonkarman-core", version = "0.2.0" }
+vonkarman-compute = { path = "vonkarman-compute", version = "0.2.0" }
 vonkarman-fft = { path = "vonkarman-fft", version = "0.2.0" }
 vonkarman-periodic = { path = "vonkarman-periodic", version = "0.2.0" }
 vonkarman-diag = { path = "vonkarman-diag", version = "0.2.0" }

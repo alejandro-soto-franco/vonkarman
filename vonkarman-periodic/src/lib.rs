@@ -6,6 +6,8 @@ pub mod ic;
 pub mod nonlinear;
 pub mod rk4;
 pub mod solver;
+pub mod state;
 
 pub use ic::IcType;
 pub use solver::Periodic3D;
+pub use state::{SpectralState, StateDims};
