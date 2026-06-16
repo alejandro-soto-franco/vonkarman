@@ -184,6 +184,151 @@ mod kernels {
             }
         }
     }
+
+    /// ETD-RK4 stage 2 / stage 3 multiply: `out = exp_half * u + dt * a * n`.
+    ///
+    /// Mirrors `vonkarman_compute::ops::etd::etd_stage_axpy_inplace`. Acts on
+    /// one velocity component: `u`, `n`, `out` are interleaved complex buffers
+    /// (`[re0, im0, ...]`, length `2 n`); `exp_half` and `a` are real per-mode
+    /// buffers (length `n`), each value applied to both interleaved slots of
+    /// its mode. One thread per spectral mode `i` writes slots `2 i, 2 i + 1`.
+    ///
+    /// `dt * a[i]` is precomputed once per mode, then each slot is written as
+    /// `exp_half * u + (dt a) * n` with plain arithmetic (no explicit
+    /// `mul_add`), so the fork's FMA CONTRACTION folds the `(dt a) * n` product
+    /// into the add as one `fma.rn.f64` per real slot (the cross/curl/leray
+    /// convention; an explicit `mul_add` would instead emit a libdevice call).
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_stage_axpy(
+        exp_half: &[f64],
+        a: &[f64],
+        dt: f64,
+        u: &[f64],
+        n: &[f64],
+        mut out: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        // `exp_half.len()` is the spectral mode count `n`; the complex buffers
+        // have length `2 n`, so guarding on `n` covers both interleaved slots.
+        if i < exp_half.len() {
+            let re = 2 * i;
+            let im = 2 * i + 1;
+            let eh = exp_half[i];
+            let dta = dt * a[i];
+            // SAFETY: `i < n` checked above; `out` has length `2 n` so both
+            // `re` and `im` are in bounds; `i` is a thread-unique index.
+            unsafe {
+                // exp_half * u + (dta) * n; the trailing product contracts into
+                // the add as one fma.rn.f64 (fma(exp_half, u, dta * n)).
+                *out.get_unchecked_mut(re) = eh * u[re] + dta * n[re];
+                *out.get_unchecked_mut(im) = eh * u[im] + dta * n[im];
+            }
+        }
+    }
+
+    /// ETD-RK4 stage 4 multiply: `out = exp_full * u + dt * a41 * (2 n3 - n1)`.
+    ///
+    /// Mirrors `vonkarman_compute::ops::etd::etd_stage4_inplace`. Acts on one
+    /// velocity component: `u`, `n1`, `n3`, `out` are interleaved complex
+    /// buffers (length `2 n`); `exp_full` and `a41` are real per-mode buffers
+    /// (length `n`). One thread per spectral mode `i`.
+    ///
+    /// `dt * a41[i]` is precomputed once per mode; the difference `2 n3 - n1`
+    /// is written plainly so the contraction folds it to `fma(2, n3, -n1)`, and
+    /// the outer `exp_full * u + dta * dn` folds to `fma(exp_full, u, dta * dn)`,
+    /// two `fma.rn.f64` per real slot (no explicit `mul_add`, which would emit a
+    /// libdevice call instead of letting the backend contract).
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_stage4(
+        exp_full: &[f64],
+        a41: &[f64],
+        dt: f64,
+        u: &[f64],
+        n1: &[f64],
+        n3: &[f64],
+        mut out: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < exp_full.len() {
+            let re = 2 * i;
+            let im = 2 * i + 1;
+            let ef = exp_full[i];
+            let dta = dt * a41[i];
+            // SAFETY: `i < n` checked above; `out` has length `2 n` so both
+            // `re` and `im` are in bounds; `i` is a thread-unique index.
+            unsafe {
+                // dn = 2 n3 - n1 contracts to fma(2, n3, -n1); the outer
+                // exp_full * u + dta * dn contracts to fma(exp_full, u, dta * dn).
+                let dn_re = 2.0 * n3[re] - n1[re];
+                let dn_im = 2.0 * n3[im] - n1[im];
+                *out.get_unchecked_mut(re) = ef * u[re] + dta * dn_re;
+                *out.get_unchecked_mut(im) = ef * u[im] + dta * dn_im;
+            }
+        }
+    }
+
+    /// ETD-RK4 final update, in place on `u`:
+    /// `u = exp_full * u + dt * (b1 n1 + b23 (n2 + n3) + b4 n4)`.
+    ///
+    /// Mirrors `vonkarman_compute::ops::etd::etd_final_inplace`. Acts on one
+    /// velocity component: `n1`, `n2`, `n3`, `n4` are interleaved complex
+    /// buffers (length `2 n`), `u` (length `2 n`) is read then written in
+    /// place; `exp_full`, `b1`, `b23`, `b4` are real per-mode buffers
+    /// (length `n`). One thread per spectral mode `i`.
+    ///
+    /// The right-hand side is written left-to-right as
+    /// `b1 n1 + b23 (n2 + n3) + b4 n4` with plain arithmetic; the contraction
+    /// folds each trailing product into the running sum (`fma(b23, n2 + n3,
+    /// b1 n1)`, then `fma(b4, n4, ...)`), and the outer `exp_full * u + dt * rhs`
+    /// folds to `fma(exp_full, u, dt * rhs)`, so each real slot contracts to a
+    /// small chain of `fma.rn.f64` (no explicit `mul_add`, which would emit a
+    /// libdevice call instead).
+    #[kernel]
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_final(
+        exp_full: &[f64],
+        b1: &[f64],
+        b23: &[f64],
+        b4: &[f64],
+        dt: f64,
+        n1: &[f64],
+        n2: &[f64],
+        n3: &[f64],
+        n4: &[f64],
+        mut u: DisjointSlice<f64>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if i < exp_full.len() {
+            let re = 2 * i;
+            let im = 2 * i + 1;
+            let ef = exp_full[i];
+            let b1i = b1[i];
+            let b23i = b23[i];
+            let b4i = b4[i];
+            // SAFETY: `i < n` checked above; `u` has length `2 n` so both `re`
+            // and `im` are in bounds; `i` is a thread-unique index. `u` is read
+            // then written through the same DisjointSlice, like the leray kernel.
+            unsafe {
+                let ur = *u.get_unchecked_mut(re);
+                let ui = *u.get_unchecked_mut(im);
+                // rhs = b1 n1 + b23 (n2 + n3) + b4 n4, written so the trailing
+                // products contract into the running sum:
+                //   fma(b4, n4, fma(b23, n2 + n3, b1 * n1)).
+                let s23_re = n2[re] + n3[re];
+                let s23_im = n2[im] + n3[im];
+                let rhs_re = b1i * n1[re] + b23i * s23_re + b4i * n4[re];
+                let rhs_im = b1i * n1[im] + b23i * s23_im + b4i * n4[im];
+                // u = exp_full * u + dt * rhs contracts to fma(exp_full, u, dt * rhs).
+                *u.get_unchecked_mut(re) = ef * ur + dt * rhs_re;
+                *u.get_unchecked_mut(im) = ef * ui + dt * rhs_im;
+            }
+        }
+    }
 }
 
 fn main() {}

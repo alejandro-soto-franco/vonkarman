@@ -6,8 +6,149 @@
 .target sm_80
 .address_size 64
 
+	// .globl	etd_stage_axpy          // -- Begin function etd_stage_axpy
+                                        // @etd_stage_axpy
+.visible .entry etd_stage_axpy(
+	.param .u64 .ptr .align 1 etd_stage_axpy_param_0,
+	.param .u64 etd_stage_axpy_param_1,
+	.param .u64 .ptr .align 1 etd_stage_axpy_param_2,
+	.param .u64 etd_stage_axpy_param_3,
+	.param .f64 etd_stage_axpy_param_4,
+	.param .u64 .ptr .align 1 etd_stage_axpy_param_5,
+	.param .u64 etd_stage_axpy_param_6,
+	.param .u64 .ptr .align 1 etd_stage_axpy_param_7,
+	.param .u64 etd_stage_axpy_param_8,
+	.param .u64 .ptr .align 1 etd_stage_axpy_param_9,
+	.param .u64 etd_stage_axpy_param_10
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<34>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd8, [etd_stage_axpy_param_0];
+	cvta.to.global.u64 	%rd1, %rd8;
+	ld.param.b64 	%rd9, [etd_stage_axpy_param_1];
+	ld.param.b64 	%rd10, [etd_stage_axpy_param_2];
+	cvta.to.global.u64 	%rd2, %rd10;
+	ld.param.b64 	%rd11, [etd_stage_axpy_param_5];
+	cvta.to.global.u64 	%rd3, %rd11;
+	ld.param.b64 	%rd12, [etd_stage_axpy_param_7];
+	cvta.to.global.u64 	%rd4, %rd12;
+	ld.param.b64 	%rd13, [etd_stage_axpy_param_9];
+	cvta.to.global.u64 	%rd5, %rd13;
+	mov.u32 	%r1, %tid.x;
+	cvt.u64.u32 	%rd14, %r1;
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mul.wide.u32 	%rd15, %r2, %r3;
+	add.s64 	%rd6, %rd15, %rd14;
+	setp.ge.u64 	%p1, %rd6, %rd9;
+	@%p1 bra 	$L__BB0_2;
+// %bb.1:                               // %bb2
+	ld.param.b64 	%rd7, [etd_stage_axpy_param_4];
+	shl.b64 	%rd16, %rd6, 3;
+	add.s64 	%rd17, %rd1, %rd16;
+	ld.global.b64 	%rd18, [%rd17];
+	add.s64 	%rd19, %rd2, %rd16;
+	ld.global.b64 	%rd20, [%rd19];
+	mul.f64 	%rd21, %rd7, %rd20;
+	shl.b64 	%rd22, %rd6, 4;
+	add.s64 	%rd23, %rd3, %rd22;
+	ld.global.b64 	%rd24, [%rd23];
+	add.s64 	%rd25, %rd4, %rd22;
+	ld.global.b64 	%rd26, [%rd25];
+	mul.f64 	%rd27, %rd21, %rd26;
+	add.s64 	%rd28, %rd5, %rd22;
+	fma.rn.f64 	%rd29, %rd18, %rd24, %rd27;
+	st.global.b64 	[%rd28], %rd29;
+	ld.global.b64 	%rd30, [%rd23+8];
+	ld.global.b64 	%rd31, [%rd25+8];
+	mul.f64 	%rd32, %rd21, %rd31;
+	fma.rn.f64 	%rd33, %rd18, %rd30, %rd32;
+	st.global.b64 	[%rd28+8], %rd33;
+$L__BB0_2:                              // %bb8
+	ret;
+                                        // -- End function
+}
+	// .globl	etd_stage4              // -- Begin function etd_stage4
+.visible .entry etd_stage4(
+	.param .u64 .ptr .align 1 etd_stage4_param_0,
+	.param .u64 etd_stage4_param_1,
+	.param .u64 .ptr .align 1 etd_stage4_param_2,
+	.param .u64 etd_stage4_param_3,
+	.param .f64 etd_stage4_param_4,
+	.param .u64 .ptr .align 1 etd_stage4_param_5,
+	.param .u64 etd_stage4_param_6,
+	.param .u64 .ptr .align 1 etd_stage4_param_7,
+	.param .u64 etd_stage4_param_8,
+	.param .u64 .ptr .align 1 etd_stage4_param_9,
+	.param .u64 etd_stage4_param_10,
+	.param .u64 .ptr .align 1 etd_stage4_param_11,
+	.param .u64 etd_stage4_param_12
+)                                       // @etd_stage4
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<43>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd9, [etd_stage4_param_0];
+	cvta.to.global.u64 	%rd1, %rd9;
+	ld.param.b64 	%rd10, [etd_stage4_param_1];
+	ld.param.b64 	%rd11, [etd_stage4_param_2];
+	cvta.to.global.u64 	%rd2, %rd11;
+	ld.param.b64 	%rd12, [etd_stage4_param_9];
+	cvta.to.global.u64 	%rd3, %rd12;
+	ld.param.b64 	%rd13, [etd_stage4_param_7];
+	cvta.to.global.u64 	%rd4, %rd13;
+	ld.param.b64 	%rd14, [etd_stage4_param_5];
+	cvta.to.global.u64 	%rd5, %rd14;
+	ld.param.b64 	%rd15, [etd_stage4_param_11];
+	cvta.to.global.u64 	%rd6, %rd15;
+	mov.u32 	%r1, %tid.x;
+	cvt.u64.u32 	%rd16, %r1;
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mul.wide.u32 	%rd17, %r2, %r3;
+	add.s64 	%rd7, %rd17, %rd16;
+	setp.ge.u64 	%p1, %rd7, %rd10;
+	@%p1 bra 	$L__BB1_2;
+// %bb.1:                               // %bb2
+	ld.param.b64 	%rd8, [etd_stage4_param_4];
+	shl.b64 	%rd18, %rd7, 3;
+	add.s64 	%rd19, %rd1, %rd18;
+	ld.global.b64 	%rd20, [%rd19];
+	add.s64 	%rd21, %rd2, %rd18;
+	ld.global.b64 	%rd22, [%rd21];
+	mul.f64 	%rd23, %rd8, %rd22;
+	shl.b64 	%rd24, %rd7, 4;
+	add.s64 	%rd25, %rd3, %rd24;
+	ld.global.b64 	%rd26, [%rd25];
+	add.s64 	%rd27, %rd4, %rd24;
+	ld.global.b64 	%rd28, [%rd27];
+	neg.f64 	%rd29, %rd28;
+	fma.rn.f64 	%rd30, %rd26, 0d4000000000000000, %rd29;
+	ld.global.b64 	%rd31, [%rd25+8];
+	ld.global.b64 	%rd32, [%rd27+8];
+	neg.f64 	%rd33, %rd32;
+	fma.rn.f64 	%rd34, %rd31, 0d4000000000000000, %rd33;
+	add.s64 	%rd35, %rd5, %rd24;
+	ld.global.b64 	%rd36, [%rd35];
+	mul.f64 	%rd37, %rd20, %rd36;
+	add.s64 	%rd38, %rd6, %rd24;
+	fma.rn.f64 	%rd39, %rd23, %rd30, %rd37;
+	st.global.b64 	[%rd38], %rd39;
+	ld.global.b64 	%rd40, [%rd35+8];
+	mul.f64 	%rd41, %rd20, %rd40;
+	fma.rn.f64 	%rd42, %rd23, %rd34, %rd41;
+	st.global.b64 	[%rd38+8], %rd42;
+$L__BB1_2:                              // %bb10
+	ret;
+                                        // -- End function
+}
 	// .globl	curl                    // -- Begin function curl
-                                        // @curl
 .visible .entry curl(
 	.param .u64 .ptr .align 1 curl_param_0,
 	.param .u64 curl_param_1,
@@ -27,7 +168,7 @@
 	.param .u64 curl_param_15,
 	.param .u64 .ptr .align 1 curl_param_16,
 	.param .u64 curl_param_17
-)
+)                                       // @curl
 {
 	.reg .pred 	%p<2>;
 	.reg .b32 	%r<4>;
@@ -60,7 +201,7 @@
 	mul.wide.u32 	%rd22, %r2, %r3;
 	add.s64 	%rd10, %rd22, %rd21;
 	setp.ge.u64 	%p1, %rd10, %rd18;
-	@%p1 bra 	$L__BB0_2;
+	@%p1 bra 	$L__BB2_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd23, %rd10, 3;
 	add.s64 	%rd24, %rd1, %rd23;
@@ -109,7 +250,107 @@
 	neg.f64 	%rd62, %rd61;
 	fma.rn.f64 	%rd63, %rd25, %rd35, %rd62;
 	st.global.b64 	[%rd59+8], %rd63;
-$L__BB0_2:                              // %bb11
+$L__BB2_2:                              // %bb11
+	ret;
+                                        // -- End function
+}
+	// .globl	etd_final               // -- Begin function etd_final
+.visible .entry etd_final(
+	.param .u64 .ptr .align 1 etd_final_param_0,
+	.param .u64 etd_final_param_1,
+	.param .u64 .ptr .align 1 etd_final_param_2,
+	.param .u64 etd_final_param_3,
+	.param .u64 .ptr .align 1 etd_final_param_4,
+	.param .u64 etd_final_param_5,
+	.param .u64 .ptr .align 1 etd_final_param_6,
+	.param .u64 etd_final_param_7,
+	.param .f64 etd_final_param_8,
+	.param .u64 .ptr .align 1 etd_final_param_9,
+	.param .u64 etd_final_param_10,
+	.param .u64 .ptr .align 1 etd_final_param_11,
+	.param .u64 etd_final_param_12,
+	.param .u64 .ptr .align 1 etd_final_param_13,
+	.param .u64 etd_final_param_14,
+	.param .u64 .ptr .align 1 etd_final_param_15,
+	.param .u64 etd_final_param_16,
+	.param .u64 .ptr .align 1 etd_final_param_17,
+	.param .u64 etd_final_param_18
+)                                       // @etd_final
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<61>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd12, [etd_final_param_0];
+	cvta.to.global.u64 	%rd1, %rd12;
+	ld.param.b64 	%rd13, [etd_final_param_1];
+	ld.param.b64 	%rd14, [etd_final_param_2];
+	cvta.to.global.u64 	%rd2, %rd14;
+	ld.param.b64 	%rd15, [etd_final_param_4];
+	cvta.to.global.u64 	%rd3, %rd15;
+	ld.param.b64 	%rd16, [etd_final_param_6];
+	cvta.to.global.u64 	%rd4, %rd16;
+	ld.param.b64 	%rd17, [etd_final_param_17];
+	cvta.to.global.u64 	%rd5, %rd17;
+	ld.param.b64 	%rd18, [etd_final_param_11];
+	cvta.to.global.u64 	%rd6, %rd18;
+	ld.param.b64 	%rd19, [etd_final_param_13];
+	cvta.to.global.u64 	%rd7, %rd19;
+	ld.param.b64 	%rd20, [etd_final_param_9];
+	cvta.to.global.u64 	%rd8, %rd20;
+	ld.param.b64 	%rd21, [etd_final_param_15];
+	cvta.to.global.u64 	%rd9, %rd21;
+	mov.u32 	%r1, %tid.x;
+	cvt.u64.u32 	%rd22, %r1;
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mul.wide.u32 	%rd23, %r2, %r3;
+	add.s64 	%rd10, %rd23, %rd22;
+	setp.ge.u64 	%p1, %rd10, %rd13;
+	@%p1 bra 	$L__BB3_2;
+// %bb.1:                               // %bb2
+	ld.param.b64 	%rd11, [etd_final_param_8];
+	shl.b64 	%rd24, %rd10, 3;
+	add.s64 	%rd25, %rd1, %rd24;
+	ld.global.b64 	%rd26, [%rd25];
+	add.s64 	%rd27, %rd2, %rd24;
+	ld.global.b64 	%rd28, [%rd27];
+	add.s64 	%rd29, %rd3, %rd24;
+	ld.global.b64 	%rd30, [%rd29];
+	add.s64 	%rd31, %rd4, %rd24;
+	ld.global.b64 	%rd32, [%rd31];
+	shl.b64 	%rd33, %rd10, 4;
+	add.s64 	%rd34, %rd5, %rd33;
+	ld.global.b64 	%rd35, [%rd34];
+	ld.global.b64 	%rd36, [%rd34+8];
+	add.s64 	%rd37, %rd6, %rd33;
+	ld.global.b64 	%rd38, [%rd37];
+	add.s64 	%rd39, %rd7, %rd33;
+	ld.global.b64 	%rd40, [%rd39];
+	add.f64 	%rd41, %rd38, %rd40;
+	ld.global.b64 	%rd42, [%rd37+8];
+	ld.global.b64 	%rd43, [%rd39+8];
+	add.f64 	%rd44, %rd42, %rd43;
+	add.s64 	%rd45, %rd8, %rd33;
+	ld.global.b64 	%rd46, [%rd45];
+	mul.f64 	%rd47, %rd28, %rd46;
+	fma.rn.f64 	%rd48, %rd30, %rd41, %rd47;
+	add.s64 	%rd49, %rd9, %rd33;
+	ld.global.b64 	%rd50, [%rd49];
+	fma.rn.f64 	%rd51, %rd32, %rd50, %rd48;
+	ld.global.b64 	%rd52, [%rd45+8];
+	mul.f64 	%rd53, %rd28, %rd52;
+	fma.rn.f64 	%rd54, %rd30, %rd44, %rd53;
+	ld.global.b64 	%rd55, [%rd49+8];
+	fma.rn.f64 	%rd56, %rd32, %rd55, %rd54;
+	mul.f64 	%rd57, %rd11, %rd51;
+	fma.rn.f64 	%rd58, %rd26, %rd35, %rd57;
+	st.global.b64 	[%rd34], %rd58;
+	mul.f64 	%rd59, %rd11, %rd56;
+	fma.rn.f64 	%rd60, %rd26, %rd36, %rd59;
+	st.global.b64 	[%rd34+8], %rd60;
+$L__BB3_2:                              // %bb14
 	ret;
                                         // -- End function
 }
@@ -166,7 +407,7 @@ $L__BB0_2:                              // %bb11
 	mul.wide.u32 	%rd22, %r2, %r3;
 	add.s64 	%rd10, %rd22, %rd20;
 	setp.ge.u64 	%p1, %rd10, %rd21;
-	@%p1 bra 	$L__BB1_2;
+	@%p1 bra 	$L__BB4_2;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd23, %rd10, 3;
 	add.s64 	%rd24, %rd1, %rd23;
@@ -196,7 +437,7 @@ $L__BB0_2:                              // %bb11
 	neg.f64 	%rd46, %rd44;
 	fma.rn.f64 	%rd47, %rd31, %rd39, %rd46;
 	st.global.b64 	[%rd45], %rd47;
-$L__BB1_2:                              // %bb10
+$L__BB4_2:                              // %bb10
 	ret;
                                         // -- End function
 }
@@ -245,13 +486,13 @@ $L__BB1_2:                              // %bb10
 	mul.wide.u32 	%rd19, %r2, %r3;
 	add.s64 	%rd8, %rd19, %rd18;
 	setp.ge.u64 	%p1, %rd8, %rd12;
-	@%p1 bra 	$L__BB2_3;
+	@%p1 bra 	$L__BB5_3;
 // %bb.1:                               // %bb2
 	shl.b64 	%rd20, %rd8, 3;
 	add.s64 	%rd21, %rd1, %rd20;
 	ld.global.b64 	%rd9, [%rd21];
 	setp.ltu.f64 	%p2, %rd9, 0d39B4484BFEEBC2A0;
-	@%p2 bra 	$L__BB2_3;
+	@%p2 bra 	$L__BB5_3;
 // %bb.2:                               // %bb4
 	add.s64 	%rd22, %rd2, %rd20;
 	ld.global.b64 	%rd23, [%rd22];
@@ -294,7 +535,7 @@ $L__BB1_2:                              // %bb10
 	st.global.b64 	[%rd36], %rd55;
 	fma.rn.f64 	%rd56, %rd54, %rd44, %rd38;
 	st.global.b64 	[%rd36+8], %rd56;
-$L__BB2_3:                              // %bb8
+$L__BB5_3:                              // %bb8
 	ret;
                                         // -- End function
 }

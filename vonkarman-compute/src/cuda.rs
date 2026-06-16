@@ -381,6 +381,289 @@ impl CudaBackend {
         }
         stream.synchronize()
     }
+
+    /// ETD-RK4 stage 2 / stage 3 multiply: `out = exp_half * u + dt * a * n`,
+    /// out of place, over resident device buffers (one velocity component).
+    ///
+    /// Loads the offline-compiled `etd_stage_axpy` kernel and launches it on the
+    /// default stream, then synchronises. `exp_half`/`a` are real per-mode
+    /// buffers (length `n`); `u`/`n`/`out` are interleaved complex buffers
+    /// (length `2 n`). With `a = a21` this is stage 2; with `a = a31`, stage 3.
+    ///
+    /// Mirrors [`crate::ops::etd::etd_stage_axpy_inplace`]; the GPU contracts
+    /// `exp_half * u + (dt a) * n` into one `fma.rn.f64` per real slot, so
+    /// results differ from the twice-rounded scalar CPU path by about one ULP.
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_stage_axpy<F: Float>(
+        &self,
+        exp_half: &RealBuf<F>,
+        a: &RealBuf<F>,
+        dt: F,
+        u: &CplxBuf<F>,
+        n: &CplxBuf<F>,
+        out: &mut CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let m = exp_half.buf.len();
+        debug_assert!(
+            a.buf.len() == m
+                && u.buf.len() == 2 * m
+                && n.buf.len() == 2 * m
+                && out.buf.len() == 2 * m,
+            "etd_stage_axpy: complex buffers must be length 2n, coeff buffers length n"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("etd_stage_axpy")?;
+
+        // Param order matches the kernel: exp_half, a, dt, u, n, out. The slice
+        // params each lower to a (ptr, len) pair; the scalar `dt` is a single
+        // f64 by value, inserted between the `a` and `u` slice pairs.
+        let mut p_exp_half = exp_half.buf.cu_deviceptr();
+        let mut l_exp_half = m as u64;
+        let mut p_a = a.buf.cu_deviceptr();
+        let mut l_a = m as u64;
+        let mut v_dt = self.as_f64(dt);
+        let mut p_u = u.buf.cu_deviceptr();
+        let mut l_u = (2 * m) as u64;
+        let mut p_n = n.buf.cu_deviceptr();
+        let mut l_n = (2 * m) as u64;
+        let mut p_out = out.buf.cu_deviceptr();
+        let mut l_out = (2 * m) as u64;
+
+        let mut params: [*mut std::ffi::c_void; 11] = [
+            &mut p_exp_half as *mut _ as *mut std::ffi::c_void,
+            &mut l_exp_half as *mut _ as *mut std::ffi::c_void,
+            &mut p_a as *mut _ as *mut std::ffi::c_void,
+            &mut l_a as *mut _ as *mut std::ffi::c_void,
+            &mut v_dt as *mut _ as *mut std::ffi::c_void,
+            &mut p_u as *mut _ as *mut std::ffi::c_void,
+            &mut l_u as *mut _ as *mut std::ffi::c_void,
+            &mut p_n as *mut _ as *mut std::ffi::c_void,
+            &mut l_n as *mut _ as *mut std::ffi::c_void,
+            &mut p_out as *mut _ as *mut std::ffi::c_void,
+            &mut l_out as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        // One thread per spectral mode (n).
+        let cfg = LaunchConfig::for_num_elems(m as u32);
+        // SAFETY: `func` came from a module loaded on `self.ctx`; the stream
+        // belongs to the same context; the 11 params alias live device pointers
+        // / lengths (and the scalar dt) in the order the PTX expects; the grid
+        // is sized for `n` modes and the kernel bounds-checks `i < n`. Params
+        // outlive the call (synchronise below before they drop).
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
+    /// ETD-RK4 stage 4 multiply: `out = exp_full * u + dt * a41 * (2 n3 - n1)`,
+    /// out of place, over resident device buffers (one velocity component).
+    ///
+    /// Loads the offline-compiled `etd_stage4` kernel and launches it on the
+    /// default stream, then synchronises. `exp_full`/`a41` are real per-mode
+    /// buffers (length `n`); `u`/`n1`/`n3`/`out` are interleaved complex buffers
+    /// (length `2 n`).
+    ///
+    /// Mirrors [`crate::ops::etd::etd_stage4_inplace`]; the GPU contracts the
+    /// difference `2 n3 - n1` and the outer combination into `fma.rn.f64`, so
+    /// results differ from the twice-rounded scalar CPU path by about one ULP.
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_stage4<F: Float>(
+        &self,
+        exp_full: &RealBuf<F>,
+        a41: &RealBuf<F>,
+        dt: F,
+        u: &CplxBuf<F>,
+        n1: &CplxBuf<F>,
+        n3: &CplxBuf<F>,
+        out: &mut CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let m = exp_full.buf.len();
+        debug_assert!(
+            a41.buf.len() == m
+                && u.buf.len() == 2 * m
+                && n1.buf.len() == 2 * m
+                && n3.buf.len() == 2 * m
+                && out.buf.len() == 2 * m,
+            "etd_stage4: complex buffers must be length 2n, coeff buffers length n"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("etd_stage4")?;
+
+        // Param order matches the kernel: exp_full, a41, dt, u, n1, n3, out.
+        let mut p_exp_full = exp_full.buf.cu_deviceptr();
+        let mut l_exp_full = m as u64;
+        let mut p_a41 = a41.buf.cu_deviceptr();
+        let mut l_a41 = m as u64;
+        let mut v_dt = self.as_f64(dt);
+        let mut p_u = u.buf.cu_deviceptr();
+        let mut l_u = (2 * m) as u64;
+        let mut p_n1 = n1.buf.cu_deviceptr();
+        let mut l_n1 = (2 * m) as u64;
+        let mut p_n3 = n3.buf.cu_deviceptr();
+        let mut l_n3 = (2 * m) as u64;
+        let mut p_out = out.buf.cu_deviceptr();
+        let mut l_out = (2 * m) as u64;
+
+        let mut params: [*mut std::ffi::c_void; 13] = [
+            &mut p_exp_full as *mut _ as *mut std::ffi::c_void,
+            &mut l_exp_full as *mut _ as *mut std::ffi::c_void,
+            &mut p_a41 as *mut _ as *mut std::ffi::c_void,
+            &mut l_a41 as *mut _ as *mut std::ffi::c_void,
+            &mut v_dt as *mut _ as *mut std::ffi::c_void,
+            &mut p_u as *mut _ as *mut std::ffi::c_void,
+            &mut l_u as *mut _ as *mut std::ffi::c_void,
+            &mut p_n1 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n1 as *mut _ as *mut std::ffi::c_void,
+            &mut p_n3 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n3 as *mut _ as *mut std::ffi::c_void,
+            &mut p_out as *mut _ as *mut std::ffi::c_void,
+            &mut l_out as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        let cfg = LaunchConfig::for_num_elems(m as u32);
+        // SAFETY: as for etd_stage_axpy; 13 params in (ptr, len) / scalar order
+        // the PTX expects, grid sized for `n` modes, kernel bounds-checks `i < n`.
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
+    /// ETD-RK4 final update, in place on `u`:
+    /// `u = exp_full * u + dt * (b1 n1 + b23 (n2 + n3) + b4 n4)`, over resident
+    /// device buffers (one velocity component).
+    ///
+    /// Loads the offline-compiled `etd_final` kernel and launches it on the
+    /// default stream, then synchronises. `exp_full`/`b1`/`b23`/`b4` are real
+    /// per-mode buffers (length `n`); `n1`/`n2`/`n3`/`n4` are interleaved complex
+    /// buffers (length `2 n`); `u` (length `2 n`) is read then written in place.
+    ///
+    /// Mirrors [`crate::ops::etd::etd_final_inplace`]; the GPU contracts the
+    /// right-hand side and the outer combination into a short `fma.rn.f64`
+    /// chain, so results differ from the twice-rounded scalar CPU path by about
+    /// one ULP per real slot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn etd_final<F: Float>(
+        &self,
+        exp_full: &RealBuf<F>,
+        b1: &RealBuf<F>,
+        b23: &RealBuf<F>,
+        b4: &RealBuf<F>,
+        dt: F,
+        n1: &CplxBuf<F>,
+        n2: &CplxBuf<F>,
+        n3: &CplxBuf<F>,
+        n4: &CplxBuf<F>,
+        u: &mut CplxBuf<F>,
+    ) -> Result<(), cuda_core::DriverError> {
+        assert_f64::<F>();
+        let m = exp_full.buf.len();
+        debug_assert!(
+            b1.buf.len() == m
+                && b23.buf.len() == m
+                && b4.buf.len() == m
+                && n1.buf.len() == 2 * m
+                && n2.buf.len() == 2 * m
+                && n3.buf.len() == 2 * m
+                && n4.buf.len() == 2 * m
+                && u.buf.len() == 2 * m,
+            "etd_final: complex buffers must be length 2n, coeff buffers length n"
+        );
+
+        let stream = self.ctx.default_stream();
+        let module = self.ctx.load_module_from_ptx_src(ptx::KERNELS)?;
+        let func = module.load_function("etd_final")?;
+
+        // Param order matches the kernel:
+        // exp_full, b1, b23, b4, dt, n1, n2, n3, n4, u.
+        let mut p_exp_full = exp_full.buf.cu_deviceptr();
+        let mut l_exp_full = m as u64;
+        let mut p_b1 = b1.buf.cu_deviceptr();
+        let mut l_b1 = m as u64;
+        let mut p_b23 = b23.buf.cu_deviceptr();
+        let mut l_b23 = m as u64;
+        let mut p_b4 = b4.buf.cu_deviceptr();
+        let mut l_b4 = m as u64;
+        let mut v_dt = self.as_f64(dt);
+        let mut p_n1 = n1.buf.cu_deviceptr();
+        let mut l_n1 = (2 * m) as u64;
+        let mut p_n2 = n2.buf.cu_deviceptr();
+        let mut l_n2 = (2 * m) as u64;
+        let mut p_n3 = n3.buf.cu_deviceptr();
+        let mut l_n3 = (2 * m) as u64;
+        let mut p_n4 = n4.buf.cu_deviceptr();
+        let mut l_n4 = (2 * m) as u64;
+        let mut p_u = u.buf.cu_deviceptr();
+        let mut l_u = (2 * m) as u64;
+
+        let mut params: [*mut std::ffi::c_void; 19] = [
+            &mut p_exp_full as *mut _ as *mut std::ffi::c_void,
+            &mut l_exp_full as *mut _ as *mut std::ffi::c_void,
+            &mut p_b1 as *mut _ as *mut std::ffi::c_void,
+            &mut l_b1 as *mut _ as *mut std::ffi::c_void,
+            &mut p_b23 as *mut _ as *mut std::ffi::c_void,
+            &mut l_b23 as *mut _ as *mut std::ffi::c_void,
+            &mut p_b4 as *mut _ as *mut std::ffi::c_void,
+            &mut l_b4 as *mut _ as *mut std::ffi::c_void,
+            &mut v_dt as *mut _ as *mut std::ffi::c_void,
+            &mut p_n1 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n1 as *mut _ as *mut std::ffi::c_void,
+            &mut p_n2 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n2 as *mut _ as *mut std::ffi::c_void,
+            &mut p_n3 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n3 as *mut _ as *mut std::ffi::c_void,
+            &mut p_n4 as *mut _ as *mut std::ffi::c_void,
+            &mut l_n4 as *mut _ as *mut std::ffi::c_void,
+            &mut p_u as *mut _ as *mut std::ffi::c_void,
+            &mut l_u as *mut _ as *mut std::ffi::c_void,
+        ];
+
+        let cfg = LaunchConfig::for_num_elems(m as u32);
+        // SAFETY: as for etd_stage_axpy; 19 params in (ptr, len) / scalar order
+        // the PTX expects, grid sized for `n` modes, kernel bounds-checks `i < n`.
+        // `u` is read then written in place by the kernel (DisjointSlice).
+        unsafe {
+            launch_kernel_on_stream(
+                &func,
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                &stream,
+                &mut params,
+            )?;
+        }
+        stream.synchronize()
+    }
+
+    /// Reinterprets a generic `F` value as `f64` for the f64-only GPU path.
+    ///
+    /// `assert_f64::<F>()` guarantees `F == f64` at every call site, so the
+    /// value already IS an `f64`; this just reads it back through `to_f64`.
+    #[inline]
+    fn as_f64<F: Float>(&self, x: F) -> f64 {
+        x.to_f64()
+    }
 }
 
 impl ComputeBackend for CudaBackend {
@@ -421,9 +704,8 @@ impl ComputeBackend for CudaBackend {
         // the interleaved [re, im, ...] f64 layout the device buffer expects.
         // SAFETY: F == f64 (checked), Complex<f64> is two contiguous f64 with
         // no padding, so reinterpreting as 2*len f64 is sound.
-        let flat: &[f64] = unsafe {
-            std::slice::from_raw_parts(host.as_ptr() as *const f64, host.len() * 2)
-        };
+        let flat: &[f64] =
+            unsafe { std::slice::from_raw_parts(host.as_ptr() as *const f64, host.len() * 2) };
         let stream = self.ctx.default_stream();
         let new = DeviceBuffer::<f64>::from_host(&stream, flat)
             .expect("CudaBackend::upload_cplx device copy failed");
@@ -681,8 +963,11 @@ mod tests {
         let ops = SpectralOps::<f64>::new(&grid);
         let (snx, sny, snz) = grid.spectral_shape();
         let n = snx * sny * snz;
-        let (mut fkx, mut fky, mut fkz) =
-            (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        let (mut fkx, mut fky, mut fkz) = (
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        );
         for ix in 0..snx {
             for iy in 0..sny {
                 for iz in 0..snz {
@@ -713,9 +998,21 @@ mod tests {
         let duz = be.upload_real::<f64>(&uz);
         // Reinterpret the real (2n) buffers as complex buffers of n points; the
         // device storage and flat layout are identical.
-        let cux = CplxBuf::<f64> { buf: dux.buf, len: n, _marker: std::marker::PhantomData };
-        let cuy = CplxBuf::<f64> { buf: duy.buf, len: n, _marker: std::marker::PhantomData };
-        let cuz = CplxBuf::<f64> { buf: duz.buf, len: n, _marker: std::marker::PhantomData };
+        let cux = CplxBuf::<f64> {
+            buf: dux.buf,
+            len: n,
+            _marker: std::marker::PhantomData,
+        };
+        let cuy = CplxBuf::<f64> {
+            buf: duy.buf,
+            len: n,
+            _marker: std::marker::PhantomData,
+        };
+        let cuz = CplxBuf::<f64> {
+            buf: duz.buf,
+            len: n,
+            _marker: std::marker::PhantomData,
+        };
         let mut cox = be.alloc_cplx::<f64>(n);
         let mut coy = be.alloc_cplx::<f64>(n);
         let mut coz = be.alloc_cplx::<f64>(n);
@@ -884,9 +1181,21 @@ mod tests {
         let dux = be.upload_real::<f64>(&ux);
         let duy = be.upload_real::<f64>(&uy);
         let duz = be.upload_real::<f64>(&uz);
-        let mut cux = CplxBuf::<f64> { buf: dux.buf, len: n, _marker: std::marker::PhantomData };
-        let mut cuy = CplxBuf::<f64> { buf: duy.buf, len: n, _marker: std::marker::PhantomData };
-        let mut cuz = CplxBuf::<f64> { buf: duz.buf, len: n, _marker: std::marker::PhantomData };
+        let mut cux = CplxBuf::<f64> {
+            buf: dux.buf,
+            len: n,
+            _marker: std::marker::PhantomData,
+        };
+        let mut cuy = CplxBuf::<f64> {
+            buf: duy.buf,
+            len: n,
+            _marker: std::marker::PhantomData,
+        };
+        let mut cuz = CplxBuf::<f64> {
+            buf: duz.buf,
+            len: n,
+            _marker: std::marker::PhantomData,
+        };
         be.leray_project::<f64>(&dkx, &dky, &dkz, &dk2, &mut cux, &mut cuy, &mut cuz)
             .expect("GPU leray launch failed");
 
@@ -934,6 +1243,367 @@ mod tests {
             let div_im = fkx[i] * gux[im] + fky[i] * guy[im] + fkz[i] * guz[im];
             let mag = (div_re * div_re + div_im * div_im).sqrt();
             assert!(mag < 1e-12, "GPU divergence at flat idx {i} = {mag:e}");
+        }
+    }
+
+    /// Deterministic pseudo-random real buffer of `len` values for the ETD
+    /// tests (non-trivial mantissas so the fused-vs-unfused rounding differs).
+    fn etd_make(seed: f64, len: usize) -> Vec<f64> {
+        (0..len)
+            .map(|i| (seed + 0.013 * i as f64).sin() * 1.7 + 0.3)
+            .collect()
+    }
+
+    /// FMA-matched CPU oracle for the ETD stage 2 / stage 3 multiply.
+    ///
+    /// The kernel writes `exp_half * u + (dt a) * n` with plain arithmetic, and
+    /// the fork contracts the trailing product into the add as one
+    /// `fma.rn.f64`: `(dt a) * n` is rounded once, then `exp_half * u + that` is
+    /// one rounding. The oracle reproduces that with `f64::mul_add` so the
+    /// comparison isolates real divergence from a benign ~1 ULP gap.
+    fn etd_stage_axpy_oracle_fma(
+        exp_half: &[f64],
+        a: &[f64],
+        dt: f64,
+        u: &[f64],
+        n: &[f64],
+    ) -> Vec<f64> {
+        let m = exp_half.len();
+        let mut out = vec![0.0; 2 * m];
+        for i in 0..m {
+            let (re, im) = (2 * i, 2 * i + 1);
+            let eh = exp_half[i];
+            let dta = dt * a[i];
+            out[re] = eh.mul_add(u[re], dta * n[re]);
+            out[im] = eh.mul_add(u[im], dta * n[im]);
+        }
+        out
+    }
+
+    #[test]
+    fn etd_stage_axpy_matches_cpu_oracle() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+
+        let m = 4096;
+        let exp_half = etd_make(0.1, m);
+        let a = etd_make(0.7, m);
+        let dt = 0.013_f64;
+        let u = etd_make(1.3, 2 * m);
+        let n = etd_make(2.7, 2 * m);
+
+        // GPU path on resident buffers. The real (2m) host buffers are uploaded
+        // and reinterpreted as complex (m); device storage / layout are identical.
+        let dexp = be.upload_real::<f64>(&exp_half);
+        let da = be.upload_real::<f64>(&a);
+        let du = be.upload_real::<f64>(&u);
+        let dn = be.upload_real::<f64>(&n);
+        let cu = CplxBuf::<f64> {
+            buf: du.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let cn = CplxBuf::<f64> {
+            buf: dn.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let mut cout = be.alloc_cplx::<f64>(m);
+        be.etd_stage_axpy::<f64>(&dexp, &da, dt, &cu, &cn, &mut cout)
+            .expect("GPU etd_stage_axpy launch failed");
+
+        let mut hout = vec![Complex::new(0.0_f64, 0.0); m];
+        be.download_cplx(&cout, &mut hout);
+        let mut gout = Vec::with_capacity(2 * m);
+        for c in &hout {
+            gout.push(c.re);
+            gout.push(c.im);
+        }
+
+        // FMA-matched oracle. Each slot is a single multiply-accumulate, so with
+        // the matched oracle the agreement is essentially bit-exact; a tight
+        // relative bound suffices (no cancellation in a pure axpy).
+        let oracle = etd_stage_axpy_oracle_fma(&exp_half, &a, dt, &u, &n);
+        let tol = 1e-15;
+        for j in 0..2 * m {
+            let rel = (gout[j] - oracle[j]).abs() / oracle[j].abs().max(f64::MIN_POSITIVE);
+            assert!(
+                rel <= tol,
+                "etd_stage_axpy mismatch idx {j}: gpu {}, oracle {}, rel {rel:e} > {tol:e}",
+                gout[j],
+                oracle[j]
+            );
+        }
+
+        // Cross-check against the plain twice-rounded CPU body: the GPU fuses,
+        // the CPU body does not, so the gap is one fused-vs-unfused product,
+        // bounded ABSOLUTELY by ~eps * |product|. With operands O(few) the
+        // products are O(few), so a small multiple of EPSILON is the right
+        // absolute bound (a pure axpy does not cancel, but we keep the same
+        // absolute-floor reasoning the other ETD tests use).
+        let mut cpu = vec![0.0; 2 * m];
+        crate::ops::etd::etd_stage_axpy_inplace::<f64>(&exp_half, &a, dt, &u, &n, &mut cpu);
+        let abs_tol = 8.0 * f64::EPSILON;
+        for j in 0..2 * m {
+            let abs = (gout[j] - cpu[j]).abs();
+            assert!(
+                abs <= abs_tol,
+                "etd_stage_axpy twice-rounded mismatch idx {j}: gpu {}, cpu {}, abs {abs:e} > {abs_tol:e}",
+                gout[j],
+                cpu[j]
+            );
+        }
+    }
+
+    /// FMA-matched CPU oracle for the ETD stage 4 multiply.
+    ///
+    /// The kernel writes `dn = 2 n3 - n1` (which contracts to `fma(2, n3, -n1)`)
+    /// then `exp_full * u + (dt a41) * dn` (which contracts to
+    /// `fma(exp_full, u, dta * dn)`). The oracle reproduces both contractions
+    /// with `f64::mul_add`.
+    fn etd_stage4_oracle_fma(
+        exp_full: &[f64],
+        a41: &[f64],
+        dt: f64,
+        u: &[f64],
+        n1: &[f64],
+        n3: &[f64],
+    ) -> Vec<f64> {
+        let m = exp_full.len();
+        let mut out = vec![0.0; 2 * m];
+        for i in 0..m {
+            let (re, im) = (2 * i, 2 * i + 1);
+            let ef = exp_full[i];
+            let dta = dt * a41[i];
+            let dn_re = 2.0_f64.mul_add(n3[re], -n1[re]);
+            let dn_im = 2.0_f64.mul_add(n3[im], -n1[im]);
+            out[re] = ef.mul_add(u[re], dta * dn_re);
+            out[im] = ef.mul_add(u[im], dta * dn_im);
+        }
+        out
+    }
+
+    #[test]
+    fn etd_stage4_matches_cpu_oracle() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+
+        let m = 4096;
+        let exp_full = etd_make(0.2, m);
+        let a41 = etd_make(0.9, m);
+        let dt = 0.021_f64;
+        let u = etd_make(1.1, 2 * m);
+        let n1 = etd_make(2.2, 2 * m);
+        let n3 = etd_make(3.3, 2 * m);
+
+        let dexp = be.upload_real::<f64>(&exp_full);
+        let da = be.upload_real::<f64>(&a41);
+        let du = be.upload_real::<f64>(&u);
+        let dn1 = be.upload_real::<f64>(&n1);
+        let dn3 = be.upload_real::<f64>(&n3);
+        let cu = CplxBuf::<f64> {
+            buf: du.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let cn1 = CplxBuf::<f64> {
+            buf: dn1.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let cn3 = CplxBuf::<f64> {
+            buf: dn3.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let mut cout = be.alloc_cplx::<f64>(m);
+        be.etd_stage4::<f64>(&dexp, &da, dt, &cu, &cn1, &cn3, &mut cout)
+            .expect("GPU etd_stage4 launch failed");
+
+        let mut hout = vec![Complex::new(0.0_f64, 0.0); m];
+        be.download_cplx(&cout, &mut hout);
+        let mut gout = Vec::with_capacity(2 * m);
+        for c in &hout {
+            gout.push(c.re);
+            gout.push(c.im);
+        }
+
+        // FMA-matched oracle. The difference `2 n3 - n1` can cancel (n1 ~ 2 n3),
+        // so a single slot can be small while the operands are O(1); accept a
+        // point if it passes EITHER a tight relative bound OR an absolute bound
+        // sized to the O(few) operands, the cross/curl/leray cancellation rule.
+        let oracle = etd_stage4_oracle_fma(&exp_full, &a41, dt, &u, &n1, &n3);
+        let rel_tol = 1e-14;
+        let abs_floor = 8.0 * f64::EPSILON;
+        for j in 0..2 * m {
+            let d = (gout[j] - oracle[j]).abs();
+            let rel = d / oracle[j].abs().max(f64::MIN_POSITIVE);
+            assert!(
+                rel <= rel_tol || d <= abs_floor,
+                "etd_stage4 mismatch idx {j}: gpu {}, oracle {}, rel {rel:e} > {rel_tol:e}, abs {d:e} > {abs_floor:e}",
+                gout[j],
+                oracle[j]
+            );
+        }
+
+        // Cross-check against the plain twice-rounded CPU body. The GPU fuses
+        // (dn and the outer combination), the CPU does not; the gap is bounded
+        // ABSOLUTELY by ~eps * |product| (products O(few)).
+        let mut cpu = vec![0.0; 2 * m];
+        crate::ops::etd::etd_stage4_inplace::<f64>(&exp_full, &a41, dt, &u, &n1, &n3, &mut cpu);
+        let abs_tol = 8.0 * f64::EPSILON;
+        for j in 0..2 * m {
+            let abs = (gout[j] - cpu[j]).abs();
+            assert!(
+                abs <= abs_tol,
+                "etd_stage4 twice-rounded mismatch idx {j}: gpu {}, cpu {}, abs {abs:e} > {abs_tol:e}",
+                gout[j],
+                cpu[j]
+            );
+        }
+    }
+
+    /// FMA-matched CPU oracle for the ETD final update.
+    ///
+    /// The kernel writes the right-hand side as
+    /// `b1 n1 + b23 (n2 + n3) + b4 n4`, parsed `((b1 n1 + b23 s23) + b4 n4)`;
+    /// the contraction folds the trailing product of each add, so the inner sum
+    /// is `fma(b23, s23, b1 * n1)` and the outer is `fma(b4, n4, inner)`. The
+    /// final combination `exp_full * u + dt * rhs` contracts to
+    /// `fma(exp_full, u, dt * rhs)`. The oracle reproduces that grouping.
+    #[allow(clippy::too_many_arguments)]
+    fn etd_final_oracle_fma(
+        exp_full: &[f64],
+        b1: &[f64],
+        b23: &[f64],
+        b4: &[f64],
+        dt: f64,
+        n1: &[f64],
+        n2: &[f64],
+        n3: &[f64],
+        n4: &[f64],
+        u: &[f64],
+    ) -> Vec<f64> {
+        let m = exp_full.len();
+        let mut out = u.to_vec();
+        for i in 0..m {
+            let (re, im) = (2 * i, 2 * i + 1);
+            let ef = exp_full[i];
+            let (b1i, b23i, b4i) = (b1[i], b23[i], b4[i]);
+            let s23_re = n2[re] + n3[re];
+            let s23_im = n2[im] + n3[im];
+            // fma(b4, n4, fma(b23, s23, b1 * n1)).
+            let rhs_re = b4i.mul_add(n4[re], b23i.mul_add(s23_re, b1i * n1[re]));
+            let rhs_im = b4i.mul_add(n4[im], b23i.mul_add(s23_im, b1i * n1[im]));
+            out[re] = ef.mul_add(u[re], dt * rhs_re);
+            out[im] = ef.mul_add(u[im], dt * rhs_im);
+        }
+        out
+    }
+
+    #[test]
+    fn etd_final_matches_cpu_oracle() {
+        let Some(be) = backend_or_skip() else {
+            return;
+        };
+
+        let m = 4096;
+        let exp_full = etd_make(0.3, m);
+        let b1 = etd_make(0.5, m);
+        let b23 = etd_make(0.6, m);
+        let b4 = etd_make(0.8, m);
+        let dt = 0.017_f64;
+        let n1 = etd_make(1.0, 2 * m);
+        let n2 = etd_make(1.5, 2 * m);
+        let n3 = etd_make(2.0, 2 * m);
+        let n4 = etd_make(2.5, 2 * m);
+        let u0 = etd_make(3.0, 2 * m);
+
+        let dexp = be.upload_real::<f64>(&exp_full);
+        let db1 = be.upload_real::<f64>(&b1);
+        let db23 = be.upload_real::<f64>(&b23);
+        let db4 = be.upload_real::<f64>(&b4);
+        let dn1 = be.upload_real::<f64>(&n1);
+        let dn2 = be.upload_real::<f64>(&n2);
+        let dn3 = be.upload_real::<f64>(&n3);
+        let dn4 = be.upload_real::<f64>(&n4);
+        let du = be.upload_real::<f64>(&u0);
+        let cn1 = CplxBuf::<f64> {
+            buf: dn1.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let cn2 = CplxBuf::<f64> {
+            buf: dn2.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let cn3 = CplxBuf::<f64> {
+            buf: dn3.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let cn4 = CplxBuf::<f64> {
+            buf: dn4.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        let mut cu = CplxBuf::<f64> {
+            buf: du.buf,
+            len: m,
+            _marker: std::marker::PhantomData,
+        };
+        be.etd_final::<f64>(
+            &dexp, &db1, &db23, &db4, dt, &cn1, &cn2, &cn3, &cn4, &mut cu,
+        )
+        .expect("GPU etd_final launch failed");
+
+        let mut hu = vec![Complex::new(0.0_f64, 0.0); m];
+        be.download_cplx(&cu, &mut hu);
+        let mut gu = Vec::with_capacity(2 * m);
+        for c in &hu {
+            gu.push(c.re);
+            gu.push(c.im);
+        }
+
+        // FMA-matched oracle. The right-hand side is a sum of signed products,
+        // which can cancel, so a slot can be small while the products are
+        // O(few); accept EITHER a tight relative bound OR an absolute bound, the
+        // cross/curl/leray cancellation rule.
+        let oracle = etd_final_oracle_fma(&exp_full, &b1, &b23, &b4, dt, &n1, &n2, &n3, &n4, &u0);
+        let rel_tol = 1e-14;
+        let abs_floor = 8.0 * f64::EPSILON;
+        for j in 0..2 * m {
+            let d = (gu[j] - oracle[j]).abs();
+            let rel = d / oracle[j].abs().max(f64::MIN_POSITIVE);
+            assert!(
+                rel <= rel_tol || d <= abs_floor,
+                "etd_final mismatch idx {j}: gpu {}, oracle {}, rel {rel:e} > {rel_tol:e}, abs {d:e} > {abs_floor:e}",
+                gu[j],
+                oracle[j]
+            );
+        }
+
+        // Cross-check against the plain twice-rounded CPU body. The GPU
+        // contracts the rhs chain and the outer combination; the CPU body does
+        // not, so the gap accumulates a few fused-vs-unfused products, each
+        // bounded by ~eps * |product| (products O(few)). A slightly larger
+        // absolute multiple of EPSILON covers the short chain.
+        let mut cpu = u0.clone();
+        crate::ops::etd::etd_final_inplace::<f64>(
+            &exp_full, &b1, &b23, &b4, dt, &n1, &n2, &n3, &n4, &mut cpu,
+        );
+        let abs_tol = 16.0 * f64::EPSILON;
+        for j in 0..2 * m {
+            let abs = (gu[j] - cpu[j]).abs();
+            assert!(
+                abs <= abs_tol,
+                "etd_final twice-rounded mismatch idx {j}: gpu {}, cpu {}, abs {abs:e} > {abs_tol:e}",
+                gu[j],
+                cpu[j]
+            );
         }
     }
 }
