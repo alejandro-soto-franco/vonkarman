@@ -191,12 +191,48 @@ Two independent statements.
    the enstrophy peak near t = 8.8 to 8.9. The peak enstrophy value differs (16.6 at N=128
    versus 20.7 at N=256), which is the expected resolution difference between the two grids.
 
-A caveat reported honestly. vonkarman and hit3d both give a peak dissipation rate near
-epsilon = 0.020, which is above the Brachet and van Rees reference band. The two
-independent codes agree with each other, which points to a grid-resolution and
-normalisation-convention difference rather than a solver error; a higher-resolution or a
-higher-precision (double-double) run would tighten this. Double-double precision is the
-planned Phase 2 and is not part of these results.
+### Dissipation peak: a diagnostic convention factor plus resolution convergence
+
+An earlier draft flagged that vonkarman over-predicted the peak dissipation rate
+(epsilon ~ 0.020) versus the Brachet 1983 / van Rees 2011 value (~0.0126) and attributed
+it loosely to resolution and convention. A full 256^3 run to t = 10 pins it down: two
+effects, both now quantified.
+
+First, a factor of two in the dissipation DIAGNOSTIC, not the solver. The code reported
+epsilon = 2 nu z with z the mean square vorticity. That z is exactly the mean square
+vorticity <|omega|^2>: its measured initial value 0.74997 matches the analytic
+Taylor-Green <|omega|^2> = 1/8 + 1/8 + 1/2 = 3/4 to five figures. The standard
+incompressible dissipation rate is epsilon = nu <|omega|^2> = nu z (equivalently 2 nu
+times the mean enstrophy, with mean enstrophy = (1/2)<|omega|^2>), so the reported figure
+was a factor of two high. This is a diagnostic-only convention: the solver evolves u_hat
+and never uses epsilon, and the GPU == CPU and cross-solver results above are unaffected.
+
+Second, genuine resolution convergence. With the standard convention epsilon = nu z:
+
+| run                | peak enstrophy z | peak epsilon = nu z | peak time |
+|--------------------|------------------|---------------------|-----------|
+| vonkarman N=128    | 16.50            | 0.0103              | 8.68      |
+| vonkarman N=256    | 18.01            | 0.0113              | 8.81      |
+| Brachet / van Rees | ~20.2            | 0.0126              | ~9.0      |
+
+The peak rises 0.0103 to 0.0113 from N=128 to N=256, converging toward the literature
+0.0126 FROM BELOW, with the peak time moving 8.68 to 8.81 to ~9.0. This is textbook
+spectral-DNS behaviour: an under-resolved grid under-predicts the dissipation peak (it
+misses the smallest-scale enstrophy) and approaches the converged value as resolution
+rises. At N=256 the peak is within about 11 percent of the reference, up from about 18
+percent at N=128; a 512^3 run would close most of the remainder. With the convention
+corrected, both resolutions sit inside the [0.005, 0.015] band the acceptance gate was
+written for, so the long-standing gate "overshoot" was the factor of two, not a physics
+or solver error.
+
+The 256^3 run integrated Taylor-Green Re=1600 to t = 10 in 1023 adaptive ETD-RK4 steps
+(about 51 minutes on the RTX 5060), energy monotone throughout and retaining 58.6 percent
+of E0 at t = 10 (the correct Re=1600 decay; only ~41 percent dissipates by t = 10),
+NaN-free, inside the 8 GB card. Reproduce with the `taylor_green_re1600_resident_256_dissipation`
+test in `vonkarman-periodic/tests/resident_reference.rs` (about half a GPU-hour).
+
+Double-double precision (Phase 2) would tighten the f64 floor further but is not part of
+these results.
 
 Figures: the energy, enstrophy, and dissipation overlays plus the L2-deviation table are
 produced by `run_all.py compare` from the per-solver CSVs.

@@ -528,8 +528,16 @@ fn taylor_green_re1600_resident_256_dissipation() {
     eprintln!(
         "PEAK256,peak_enstrophy={peak_enstrophy:.6e},peak_epsilon={peak_epsilon:.6e},peak_time={peak_time:.4},final_energy={final_energy:.6e},E0={e0:.6e},steps={step},wall_s={run_secs:.1}"
     );
+    // The diagnostic epsilon above is 2*nu*z with z = <|omega|^2> (its t=0 value
+    // 0.75 matches the analytic Taylor-Green <|omega|^2> = 1/8+1/8+1/2 = 3/4). The
+    // STANDARD incompressible dissipation rate is epsilon = nu*<|omega|^2> = nu*z
+    // (= 2*nu times the mean enstrophy (1/2)<|omega|^2>), i.e. half the figure
+    // above. Report it explicitly so the comparison to the literature is in the
+    // right convention.
+    let peak_epsilon_std = 0.5 * peak_epsilon;
+    eprintln!("PEAK256_STD,peak_epsilon_nu_z={peak_epsilon_std:.6e} (standard nu*<|omega|^2>)");
     eprintln!(
-        "Compare: N=128 resident peak epsilon ~2.07e-2 at t~8.68; Brachet/van Rees band ~0.0126 near t~9."
+        "Compare (standard convention): N=128 ~1.03e-2 @ t~8.68; N=256 here; Brachet/van Rees ~1.26e-2 @ t~9 (converging from below)."
     );
 
     // Sanity only (the literature band is REPORTED, not gated, for this study).
@@ -541,9 +549,13 @@ fn taylor_green_re1600_resident_256_dissipation() {
         peak_enstrophy.is_finite() && peak_epsilon > 0.0,
         "no finite peak captured"
     );
+    // Taylor-Green Re=1600 dissipates only ~41% of its energy by t=10 (the peak
+    // dissipation is at t~9), so E(10) ~ 0.59 E0. A "< 0.5 E0" expectation is the
+    // wrong physics; assert significant decay with a realistic bound (per-step
+    // monotonicity is already enforced inside the loop above).
     assert!(
-        final_energy < 0.5 * e0,
-        "insufficient energy decay: E0={e0}, E_final={final_energy}"
+        final_energy < 0.7 * e0,
+        "expected significant energy decay by t=10: E0={e0}, E_final={final_energy}"
     );
 }
 
