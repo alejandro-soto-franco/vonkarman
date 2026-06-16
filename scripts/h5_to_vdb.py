@@ -22,7 +22,7 @@ import glob
 import os
 import numpy as np
 import h5py
-import pyopenvdb as vdb
+import openvdb as vdb
 
 
 def vort_mag(h5) -> np.ndarray:
@@ -81,7 +81,6 @@ def main() -> None:
         grid = vdb.FloatGrid()
         grid.copyFromArray(np.ascontiguousarray(wmag * scale))
         grid.name = "density"
-        grid.gridClass = vdb.GridClass.FOG_VOLUME
         out = os.path.join(out_dir, f"frame_{i:04d}.vdb")
         vdb.write(out, grids=[grid])
         print(f"  step {step:>6} -> {out}")
