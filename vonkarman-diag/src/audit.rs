@@ -132,12 +132,14 @@ impl ConservationAudit {
                 });
             }
 
-            // Energy budget: |dE/dt + 2*nu*Omega| / |2*nu*Omega|
+            // Energy budget: |dE/dt + nu*Omega| / |nu*Omega|, with Omega =
+            // <|omega|^2> (no 1/2, the value enstrophy() returns). dE/dt =
+            // -nu*<|omega|^2> (= -2 nu times the mean enstrophy (1/2)<|omega|^2>).
             if let Some(prev_dt) = self.prev_dt
                 && prev_dt > 0.0
             {
                 let de_dt = (energy - prev) / prev_dt;
-                let expected = -2.0 * nu * enstrophy;
+                let expected = -nu * enstrophy;
                 let denom = expected.abs().max(1e-30);
                 let residual = (de_dt - expected).abs() / denom;
                 if residual > self.config.energy_budget_tol {

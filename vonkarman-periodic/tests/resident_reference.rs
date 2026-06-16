@@ -354,7 +354,7 @@ fn taylor_green_re1600_resident_128() {
             solver.download_u_hat_all(&mut host);
             let e = energy_from_uhat(&host, &grid);
             let z = enstrophy_from_uhat(&host, &ops, &grid);
-            let epsilon = 2.0 * nu * z;
+            let epsilon = nu * z; // dissipation rate nu*<|omega|^2> (z is <|omega|^2>)
 
             assert!(e.is_finite(), "NaN/Inf energy at step {step}, t={time}");
             assert!(
@@ -392,20 +392,16 @@ fn taylor_green_re1600_resident_128() {
     );
 
     // Peak dissipation rate gate, IDENTICAL to the CPU reference_data test:
-    // epsilon in [0.005, 0.015]. NOTE (measured 2026): at N=128 the under-
-    // resolved TG Re1600 run over-predicts enstrophy and BOTH paths overshoot
-    // this gate. The resident GPU peak epsilon is ~2.07e-2 (enstrophy 1.654e1 at
-    // t=8.68); the CPU `reference_data` test, run to completion on the same box,
-    // peaks at epsilon 2.081e-2 (enstrophy 1.665e1 at t=8.82) and FAILS the same
-    // assertion. The two agree to <1% (the small gap is the resident every-25-
-    // step sampling vs the CPU every-step peak capture). The gate is kept
-    // UNCHANGED (not relaxed): the resident path faithfully reproduces the CPU
-    // physics; the literature [0.005, 0.015] band is for a well-resolved grid and
-    // is not met at N=128 by EITHER solver.
+    // epsilon = nu*<|omega|^2> in [0.005, 0.015]. With the correct convention the
+    // N=128 peak is ~1.03e-2 (enstrophy ~16.5 at t~8.68), comfortably inside the
+    // band. (Before the dissipation factor was fixed the diagnostic reported
+    // 2*nu*z ~ 2.07e-2 and appeared to overshoot; the 256^3 run showed the gap
+    // was this factor of two plus genuine under-resolution, epsilon rising 0.0103
+    // at N=128 to 0.0113 at N=256 toward the Brachet/van Rees 0.0126. See
+    // RESULTS.md.)
     assert!(
         peak_epsilon > 0.005 && peak_epsilon < 0.015,
-        "peak epsilon={peak_epsilon:.6e}, expected in [0.005, 0.015] \
-         (N=128 under-resolved; CPU reference_data overshoots identically at ~2.08e-2)"
+        "peak epsilon={peak_epsilon:.6e}, expected in [0.005, 0.015]"
     );
 
     // Energy should have decayed significantly (E0 = 1/8 analytical).
@@ -501,7 +497,7 @@ fn taylor_green_re1600_resident_256_dissipation() {
             solver.download_u_hat_all(&mut host);
             let e = energy_from_uhat(&host, &grid);
             let z = enstrophy_from_uhat(&host, &ops, &grid);
-            let epsilon = 2.0 * nu * z;
+            let epsilon = nu * z; // dissipation rate nu*<|omega|^2> (z is <|omega|^2>)
             assert!(
                 e.is_finite() && z.is_finite(),
                 "NaN/Inf at step {step}, t={time}"
@@ -528,16 +524,11 @@ fn taylor_green_re1600_resident_256_dissipation() {
     eprintln!(
         "PEAK256,peak_enstrophy={peak_enstrophy:.6e},peak_epsilon={peak_epsilon:.6e},peak_time={peak_time:.4},final_energy={final_energy:.6e},E0={e0:.6e},steps={step},wall_s={run_secs:.1}"
     );
-    // The diagnostic epsilon above is 2*nu*z with z = <|omega|^2> (its t=0 value
-    // 0.75 matches the analytic Taylor-Green <|omega|^2> = 1/8+1/8+1/2 = 3/4). The
-    // STANDARD incompressible dissipation rate is epsilon = nu*<|omega|^2> = nu*z
-    // (= 2*nu times the mean enstrophy (1/2)<|omega|^2>), i.e. half the figure
-    // above. Report it explicitly so the comparison to the literature is in the
-    // right convention.
-    let peak_epsilon_std = 0.5 * peak_epsilon;
-    eprintln!("PEAK256_STD,peak_epsilon_nu_z={peak_epsilon_std:.6e} (standard nu*<|omega|^2>)");
+    // epsilon above is the standard dissipation rate nu*z with z = <|omega|^2>
+    // (its t=0 value 0.75 matches the analytic Taylor-Green <|omega|^2> =
+    // 1/8+1/8+1/2 = 3/4). Compare to the literature in this convention.
     eprintln!(
-        "Compare (standard convention): N=128 ~1.03e-2 @ t~8.68; N=256 here; Brachet/van Rees ~1.26e-2 @ t~9 (converging from below)."
+        "Compare: N=128 peak nu*z ~1.03e-2 @ t~8.68; N=256 here; Brachet/van Rees ~1.26e-2 @ t~9 (converging from below)."
     );
 
     // Sanity only (the literature band is REPORTED, not gated, for this study).

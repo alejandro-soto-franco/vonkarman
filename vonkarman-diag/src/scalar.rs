@@ -47,10 +47,13 @@ impl ScalarDiagnostics {
 
     /// Compute dissipation rates from physics.
     /// Returns (dE/dt, dH/dt).
-    /// dE/dt = -2 * nu * Omega (enstrophy)
-    /// dH/dt = -2 * nu * H_2 (superhelicity)
+    /// dE/dt = -nu * <|omega|^2>: here `enstrophy` is <|omega|^2> (no 1/2, the
+    ///   value `domain.enstrophy()` returns), so the energy dissipation rate is
+    ///   nu * <|omega|^2> = 2 nu * (1/2)<|omega|^2> (2 nu times the mean enstrophy).
+    /// dH/dt = -2 * nu * H_2 (superhelicity): helicity carries no 1/2, so the
+    ///   factor 2 nu is correct for it (unlike the energy rate above).
     pub fn compute_rates(nu: f64, enstrophy: f64, superhelicity: f64) -> (f64, f64) {
-        (-2.0 * nu * enstrophy, -2.0 * nu * superhelicity)
+        (-nu * enstrophy, -2.0 * nu * superhelicity)
     }
 }
 
@@ -80,7 +83,7 @@ mod tests {
     fn energy_dissipation_identity() {
         let nu = 0.01;
         let enstrophy = 10.0;
-        let expected_rate = -2.0 * nu * enstrophy;
+        let expected_rate = -nu * enstrophy; // dE/dt = -nu*<|omega|^2>
         let (rate, _) = ScalarDiagnostics::compute_rates(nu, enstrophy, 5.0);
         assert!((rate - expected_rate).abs() < 1e-14);
     }

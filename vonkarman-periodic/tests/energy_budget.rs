@@ -1,8 +1,10 @@
 //! Energy and helicity budget closure tests.
 //!
-//! Verifies that dE/dt = -2*nu*Omega and dH/dt = -2*nu*S_H
-//! hold to tolerances consistent with the ETD-RK4 timestepping error.
-//! The discrete budget residual is O(dt), so we check relative to dt.
+//! Verifies that dE/dt = -nu*Omega and dH/dt = -2*nu*S_H hold to tolerances
+//! consistent with the ETD-RK4 timestepping error, where Omega = <|omega|^2>
+//! is the value `enstrophy()` returns (no 1/2). The energy rate is nu*Omega
+//! (= 2 nu times the mean enstrophy (1/2)Omega); helicity has no 1/2 so its
+//! rate keeps the 2 nu factor. The discrete budget residual is O(dt).
 
 use vonkarman_core::domain::Domain;
 use vonkarman_core::field::GridSpec;
@@ -35,14 +37,16 @@ fn energy_budget_taylor_green() {
         // Midpoint enstrophy for better accuracy
         let enstrophy_mid = 0.5 * (prev_enstrophy + enstrophy);
         let de_dt = (e - prev_e) / dt;
-        let expected = -2.0 * nu * enstrophy_mid;
+        let expected = -nu * enstrophy_mid; // dE/dt = -nu*<|omega|^2>
         let residual = (de_dt - expected).abs() / expected.abs().max(1e-30);
 
         max_residual = max_residual.max(residual);
 
-        // With ETD-RK4 at this resolution, the budget should close within ~50%
-        // (discrete approximation error). The key is it converges to zero with dt.
-        if residual < 0.6 {
+        // With the correct convention the midpoint budget closes tightly (O(dt)
+        // discrete error from the finite-difference dE/dt and the midpoint
+        // enstrophy); 15% per step is comfortable headroom. Before the factor was
+        // fixed this residual sat near 50% (the 2x error), masked by a 60% gate.
+        if residual < 0.15 {
             budget_ok_count += 1;
         }
 
@@ -50,10 +54,10 @@ fn energy_budget_taylor_green() {
         prev_enstrophy = enstrophy;
     }
 
-    // At least 90% of steps should have residual < 60%
+    // At least 90% of steps should have residual < 15%
     let frac_ok = budget_ok_count as f64 / 50.0;
     eprintln!("max energy budget residual: {max_residual:.6e}");
-    eprintln!("fraction of steps with residual < 0.6: {frac_ok:.2}");
+    eprintln!("fraction of steps with residual < 0.15: {frac_ok:.2}");
     assert!(
         frac_ok > 0.9,
         "energy budget too far off: only {:.0}% of steps within tolerance, max residual={max_residual:.3e}",

@@ -70,11 +70,14 @@ fn taylor_green_diagnostics_consistency() {
     let e2 = solver.energy();
 
     let computed_rate = (e2 - e1) / dt;
-    let expected_rate = -2.0 * nu * ens;
+    let expected_rate = -nu * ens; // dE/dt = -nu*<|omega|^2>
 
     let rel_err = (computed_rate - expected_rate).abs() / expected_rate.abs().max(1e-30);
+    // First-order forward difference with the start-of-step enstrophy, so O(dt)
+    // error; 20% is comfortable. Before the factor fix this sat near 50% (the 2x),
+    // masked by the old < 0.5 gate.
     assert!(
-        rel_err < 0.5,
+        rel_err < 0.2,
         "dissipation rate mismatch: computed={computed_rate}, expected={expected_rate}, rel_err={rel_err}"
     );
 }

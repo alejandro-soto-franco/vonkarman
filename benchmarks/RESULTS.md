@@ -198,14 +198,21 @@ An earlier draft flagged that vonkarman over-predicted the peak dissipation rate
 it loosely to resolution and convention. A full 256^3 run to t = 10 pins it down: two
 effects, both now quantified.
 
-First, a factor of two in the dissipation DIAGNOSTIC, not the solver. The code reported
-epsilon = 2 nu z with z the mean square vorticity. That z is exactly the mean square
-vorticity <|omega|^2>: its measured initial value 0.74997 matches the analytic
-Taylor-Green <|omega|^2> = 1/8 + 1/8 + 1/2 = 3/4 to five figures. The standard
-incompressible dissipation rate is epsilon = nu <|omega|^2> = nu z (equivalently 2 nu
-times the mean enstrophy, with mean enstrophy = (1/2)<|omega|^2>), so the reported figure
-was a factor of two high. This is a diagnostic-only convention: the solver evolves u_hat
-and never uses epsilon, and the GPU == CPU and cross-solver results above are unaffected.
+First, a factor of two in the dissipation DIAGNOSTIC, not the solver, now FIXED. The
+diagnostics had reported epsilon = 2 nu z with z the mean square vorticity. That z is
+exactly <|omega|^2>: its measured initial value 0.74997 matches the analytic Taylor-Green
+<|omega|^2> = 1/8 + 1/8 + 1/2 = 3/4 to five figures. The standard incompressible
+dissipation rate is epsilon = nu <|omega|^2> = nu z (equivalently 2 nu times the mean
+enstrophy, with mean enstrophy = (1/2)<|omega|^2>), so the old figure was a factor of two
+high. The diagnostic is now epsilon = nu z everywhere it is computed (the resident and CPU
+reference tests, the conservation audit, and the ScalarDiagnostics output); the helicity
+dissipation, which carries no 1/2, correctly keeps its 2 nu factor, as does the
+dissipation spectrum 2 nu k^2 E(k) where E(k) already holds the 1/2. The fix is confirmed
+by the energy budget identity dE/dt = -nu <|omega|^2>: its closure residual drops from
+about 50 percent (the masked factor of two) to about 3 percent (the O(dt) discretisation
+floor) on the Taylor-Green test. This is a diagnostic-only convention: the solver evolves
+u_hat and never uses epsilon, so the GPU == CPU and cross-solver results above are
+unaffected.
 
 Second, genuine resolution convergence. With the standard convention epsilon = nu z:
 

@@ -30,7 +30,7 @@ fn taylor_green_re1600_reference() {
         step += 1;
         let e = solver.energy();
         let enstrophy = solver.enstrophy();
-        let epsilon = 2.0 * nu * enstrophy;
+        let epsilon = nu * enstrophy; // dissipation rate nu*<|omega|^2>
         let t = solver.time();
 
         // Check no NaN
@@ -70,8 +70,10 @@ fn taylor_green_re1600_reference() {
         "enstrophy peak at t={peak_time}, expected in [7, 11]"
     );
 
-    // Peak dissipation rate: approximately 0.008-0.010 at Re=1600
-    // At N=128 we accept wider tolerance since it's under-resolved vs N=512
+    // Peak dissipation rate epsilon = nu*<|omega|^2>. The Brachet/van Rees value
+    // is ~0.0126; at N=128 the under-resolved grid under-predicts it (~0.0103,
+    // converging toward 0.0126 from below as resolution rises, see RESULTS.md), so
+    // the [0.005, 0.015] band brackets the converged value with resolution slack.
     assert!(
         peak_epsilon > 0.005 && peak_epsilon < 0.015,
         "peak epsilon={peak_epsilon:.6e}, expected in [0.005, 0.015]"
