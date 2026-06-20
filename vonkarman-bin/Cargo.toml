@@ -6,6 +6,10 @@ license.workspace = true
 description = "CLI binary for the vonkarman solver"
 publish = false
 
+[lib]
+name = "vonkarman_bin"
+path = "src/lib.rs"
+
 [[bin]]
 name = "vonkarman"
 path = "src/main.rs"
@@ -16,6 +20,7 @@ vonkarman-fft = { workspace = true }
 vonkarman-periodic = { workspace = true }
 vonkarman-diag = { workspace = true }
 ndarray = { workspace = true }
+num-complex = { workspace = true }
 serde = { workspace = true }
 vonkarman-io = { workspace = true }
 clap = { version = "4", features = ["derive"] }

@@ -5,6 +5,7 @@ mod validate;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::fmt;
+use vonkarman_bin::export;
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +30,15 @@ enum Commands {
         /// Path to a checkpoint file to restart from.
         #[arg(long)]
         restart: Option<String>,
+    },
+    /// Convert a run's spectral checkpoints to a .vti/.pvd time series.
+    ExportVtk {
+        /// Directory containing checkpoint_*.h5 files.
+        #[arg(short, long)]
+        input: String,
+        /// Output directory for frame_*.vti and series.pvd.
+        #[arg(short, long)]
+        output: String,
     },
 }
 
@@ -59,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             run::run(&config, restart.as_deref())?;
+        }
+        Commands::ExportVtk { input, output } => {
+            export::export_vtk(&input, &output)?;
         }
     }
 
