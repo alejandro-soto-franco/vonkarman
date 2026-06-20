@@ -1,0 +1,35 @@
+[run]
+name = "colliding-rings-smoke"
+output_dir = "./output/colliding-rings-smoke"
+
+[domain]
+type = "periodic3d"
+n = 64
+l = 6.283185307179586
+backend = "auto"
+
+[physics]
+nu = 1.5e-3
+
+[precision]
+tier = "f64"
+
+[integrator]
+method = "etd-rk4"
+cfl_safety = 0.5
+
+[initial_condition]
+type = "colliding-vortex-rings"
+
+[commit_cycle]
+diagnostics_interval = 5
+snapshot_interval = 100000
+checkpoint_interval = 10
+
+[diagnostics]
+conservation_audit = true
+
+[termination]
+max_steps = 400
+max_time = 12.0
+max_wall_hours = 8.0

@@ -240,4 +240,20 @@ max_vorticity_threshold = 1e12
         assert_eq!(cfg.termination.max_steps, Some(1_000_000));
         assert!((cfg.termination.max_time.unwrap() - 10.0).abs() < 1e-14);
     }
+
+    #[test]
+    fn colliding_rings_configs_parse() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        for f in ["colliding_rings.toml", "colliding_rings_smoke.toml"] {
+            let path = std::path::PathBuf::from(manifest_dir)
+                .parent()
+                .unwrap()
+                .join("experiments")
+                .join(f);
+            let s = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
+            let _cfg: ExperimentConfig = toml::from_str(&s)
+                .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path.display(), e));
+        }
+    }
 }
