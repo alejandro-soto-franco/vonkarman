@@ -44,9 +44,16 @@ pub fn run(
                 separation: 1.0,
                 perturbation: 0.1,
             },
-            "colliding-vortex-rings" => {
-                unimplemented!("colliding rings: implemented in Task 2/3")
-            }
+            "colliding-vortex-rings" | "colliding-rings" => IcType::CollidingVortexRings {
+                // Defaults mirror ic/mod.rs: default_ring_radius=1.0, default_ring_core_radius=0.35,
+                // default_one=1.0 (circulation), default_ring_separation=2.0, default_ring_axis=2.
+                // Those helpers are crate-private in vonkarman-periodic so literals are used here.
+                ring_radius: 1.0,
+                core_radius: 0.35,
+                circulation: 1.0,
+                separation: 2.0,
+                axis: 2,
+            },
             other => return Err(format!("unknown IC type: {other}").into()),
         };
         Periodic3D::new(grid, nu, ic, backend_mode)

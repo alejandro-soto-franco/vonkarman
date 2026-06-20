@@ -65,9 +65,21 @@ impl Periodic3D {
                 energy,
                 seed,
             } => ic::random_isotropic(&grid, k_peak, energy, seed, fft.as_ref()),
-            IcType::CollidingVortexRings { .. } => {
-                unimplemented!("colliding rings: implemented in Task 2/3")
-            }
+            IcType::CollidingVortexRings {
+                ring_radius,
+                core_radius,
+                circulation,
+                separation,
+                axis,
+            } => ic::colliding_vortex_rings(
+                &grid,
+                ring_radius,
+                core_radius,
+                circulation,
+                separation,
+                axis,
+                fft.as_ref(),
+            ),
         };
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
             Array3::zeros(shape),
@@ -706,5 +718,18 @@ mod tests {
         }
         assert_eq!(continuous.time(), restarted.time());
         assert_eq!(continuous.step_count(), restarted.step_count());
+    }
+
+    #[test]
+    fn colliding_rings_solver_constructs() {
+        let grid = GridSpec::cubic(16, 2.0 * std::f64::consts::PI);
+        let ic = IcType::CollidingVortexRings {
+            ring_radius: 1.0,
+            core_radius: 0.35,
+            circulation: 1.0,
+            separation: 2.0,
+            axis: 2,
+        };
+        let _solver = Periodic3D::new(grid, 1e-3, ic, BackendMode::Cpu);
     }
 }
