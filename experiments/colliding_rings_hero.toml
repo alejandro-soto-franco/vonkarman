@@ -1,0 +1,38 @@
+# Dense-cadence 128^3 colliding-rings run for the flowforms hero animation.
+# Same physics as colliding_rings.toml, but checkpoints every 2 steps so the
+# exported .pvd series has enough frames for a smooth orbit-camera animation.
+
+[run]
+name = "colliding-rings-hero"
+output_dir = "./output/colliding-rings-hero"
+
+[domain]
+type = "periodic3d"
+n = 128
+l = 6.283185307179586
+backend = "auto"
+
+[physics]
+nu = 1.5e-3
+
+[precision]
+tier = "f64"
+
+[integrator]
+method = "etd-rk4"
+cfl_safety = 0.5
+
+[initial_condition]
+type = "colliding-vortex-rings"
+
+[commit_cycle]
+diagnostics_interval = 1
+snapshot_interval = 100000
+checkpoint_interval = 2
+
+[diagnostics]
+conservation_audit = true
+
+[termination]
+max_time = 12.0
+max_wall_hours = 8.0
