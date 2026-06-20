@@ -29,7 +29,7 @@ type = "taylor-green"
 [commit_cycle]
 diagnostics_interval = 1
 snapshot_interval = 100000
-checkpoint_interval = 2
+checkpoint_interval = 1
 
 [diagnostics]
 conservation_audit = true
