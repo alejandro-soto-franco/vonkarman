@@ -12,7 +12,7 @@ output_dir = "./output/antiparallel"
 
 [domain]
 type = "periodic3d"
-n = 128
+n = 64
 l = 6.283185307179586
 backend = "cpu"
 
