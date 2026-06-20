@@ -1,8 +1,8 @@
 //! VTK XML writers (ImageData .vti and PVD time-series) for visualization.
-use std::io::Write;
-use std::path::Path;
 use base64::Engine;
 use ndarray::Array3;
+use std::io::Write;
+use std::path::Path;
 use vonkarman_core::domain::Snapshot;
 
 /// Reorder a C-order (z-fastest) ndarray into VTK point order (x-fastest).
@@ -66,23 +66,38 @@ pub fn write_vti(path: &Path, snapshot: &Snapshot<f64>) -> Result<(), Box<dyn st
     // per axis on the periodic grid, so extent is 0 (nx-1) 0 (ny-1) 0 (nz-1).
     let ex = format!("0 {} 0 {} 0 {}", nx - 1, ny - 1, nz - 1);
     let mut f = std::fs::File::create(path)?;
-    write!(f, r#"<?xml version="1.0"?>
+    write!(
+        f,
+        r#"<?xml version="1.0"?>
 <VTKFile type="ImageData" version="1.0" byte_order="LittleEndian" header_type="UInt64">
   <ImageData WholeExtent="{ex}" Origin="0 0 0" Spacing="{dx} {dy} {dz}">
     <Piece Extent="{ex}">
       <PointData Vectors="velocity">
-"#)?;
-    write!(f, r#"        <DataArray type="Float64" Name="velocity" NumberOfComponents="3" format="binary">{}</DataArray>
-"#, encode_f64_le(&velocity))?;
-    write!(f, r#"        <DataArray type="Float64" Name="vorticity" NumberOfComponents="3" format="binary">{}</DataArray>
-"#, encode_f64_le(&vorticity))?;
-    write!(f, r#"        <DataArray type="Float64" Name="omega_mag" NumberOfComponents="1" format="binary">{}</DataArray>
-"#, encode_f64_le(&omega_mag))?;
-    write!(f, r#"      </PointData>
+"#
+    )?;
+    writeln!(
+        f,
+        r#"        <DataArray type="Float64" Name="velocity" NumberOfComponents="3" format="binary">{}</DataArray>"#,
+        encode_f64_le(&velocity)
+    )?;
+    writeln!(
+        f,
+        r#"        <DataArray type="Float64" Name="vorticity" NumberOfComponents="3" format="binary">{}</DataArray>"#,
+        encode_f64_le(&vorticity)
+    )?;
+    writeln!(
+        f,
+        r#"        <DataArray type="Float64" Name="omega_mag" NumberOfComponents="1" format="binary">{}</DataArray>"#,
+        encode_f64_le(&omega_mag)
+    )?;
+    write!(
+        f,
+        r#"      </PointData>
     </Piece>
   </ImageData>
 </VTKFile>
-"#)?;
+"#
+    )?;
     Ok(())
 }
 
@@ -91,10 +106,16 @@ pub fn write_vti(path: &Path, snapshot: &Snapshot<f64>) -> Result<(), Box<dyn st
 pub fn write_pvd(path: &Path, entries: &[(f64, String)]) -> Result<(), Box<dyn std::error::Error>> {
     let mut f = std::fs::File::create(path)?;
     writeln!(f, r#"<?xml version="1.0"?>"#)?;
-    writeln!(f, r#"<VTKFile type="Collection" version="1.0" byte_order="LittleEndian">"#)?;
+    writeln!(
+        f,
+        r#"<VTKFile type="Collection" version="1.0" byte_order="LittleEndian">"#
+    )?;
     writeln!(f, r#"  <Collection>"#)?;
     for (t, file) in entries {
-        writeln!(f, r#"    <DataSet timestep="{t}" group="" part="0" file="{file}"/>"#)?;
+        writeln!(
+            f,
+            r#"    <DataSet timestep="{t}" group="" part="0" file="{file}"/>"#
+        )?;
     }
     writeln!(f, r#"  </Collection>"#)?;
     writeln!(f, r#"</VTKFile>"#)?;
@@ -110,9 +131,13 @@ mod tests {
     fn reorder_puts_x_fastest() {
         // 2x2x2 array where value encodes (ix,iy,iz) as ix*100+iy*10+iz.
         let mut a = Array3::<f64>::zeros((2, 2, 2));
-        for ix in 0..2 { for iy in 0..2 { for iz in 0..2 {
-            a[[ix, iy, iz]] = (ix * 100 + iy * 10 + iz) as f64;
-        }}}
+        for ix in 0..2 {
+            for iy in 0..2 {
+                for iz in 0..2 {
+                    a[[ix, iy, iz]] = (ix * 100 + iy * 10 + iz) as f64;
+                }
+            }
+        }
         let flat = reorder_zfast_to_xfast(&a);
         // VTK index p = ix + nx*(iy + ny*iz); x fastest.
         // p=0 -> (0,0,0)=0 ; p=1 -> (1,0,0)=100 ; p=2 -> (0,1,0)=10
@@ -124,11 +149,18 @@ mod tests {
 
     #[test]
     fn write_vti_produces_parseable_file() {
-        use vonkarman_core::field::{GridSpec, VectorField};
-        use vonkarman_core::domain::{Snapshot, PhysicsParams, DomainType};
         use num_complex::Complex;
+        use vonkarman_core::domain::{DomainType, PhysicsParams, Snapshot};
+        use vonkarman_core::field::{GridSpec, VectorField};
         let grid = GridSpec::cubic(4, std::f64::consts::TAU);
-        let zero = || VectorField { data: [Array3::zeros((4,4,4)), Array3::zeros((4,4,4)), Array3::zeros((4,4,4))], grid };
+        let zero = || VectorField {
+            data: [
+                Array3::zeros((4, 4, 4)),
+                Array3::zeros((4, 4, 4)),
+                Array3::zeros((4, 4, 4)),
+            ],
+            grid,
+        };
         let snap = Snapshot {
             time: 1.5_f64,
             step: 3,
@@ -141,7 +173,11 @@ mod tests {
                 Array3::<Complex<f64>>::zeros((4, 4, 3)),
             ],
             grid,
-            params: PhysicsParams { nu: 1e-3, re: 1000.0, domain: DomainType::Periodic3D },
+            params: PhysicsParams {
+                nu: 1e-3,
+                re: 1000.0,
+                domain: DomainType::Periodic3D,
+            },
         };
         let tmp = std::env::temp_dir().join("ff_test.vti");
         write_vti(&tmp, &snap).unwrap();
@@ -153,7 +189,11 @@ mod tests {
     #[test]
     fn pvd_lists_timesteps() {
         let tmp = std::env::temp_dir().join("ff_seq.pvd");
-        write_pvd(&tmp, &[(0.0, "f_0000.vti".into()), (0.5, "f_0001.vti".into())]).unwrap();
+        write_pvd(
+            &tmp,
+            &[(0.0, "f_0000.vti".into()), (0.5, "f_0001.vti".into())],
+        )
+        .unwrap();
         let body = std::fs::read_to_string(&tmp).unwrap();
         assert!(body.contains(r#"timestep="0""#));
         assert!(body.contains(r#"file="f_0001.vti""#));

@@ -27,7 +27,7 @@ type C = Complex<f64>;
 /// Spectral operators on an `n x n` periodic grid over `[0, 2*pi)^2`.
 pub struct Spectral2D {
     n: usize,
-    nh: usize, // n/2 + 1 (rFFT half-spectrum length)
+    nh: usize,              // n/2 + 1 (rFFT half-spectrum length)
     hx: FftHandler<f64>,    // axis 0: full complex FFT (kx)
     hy: R2cFftHandler<f64>, // axis 1: real-to-complex FFT (ky)
     kx: Array2<f64>,
@@ -45,14 +45,22 @@ impl Spectral2D {
         let mut dealias = Array2::<f64>::zeros((n, nh));
         let cut = (n as f64) / 3.0;
         for i in 0..n {
-            let kxi = if i <= n / 2 { i as f64 } else { i as f64 - n as f64 };
+            let kxi = if i <= n / 2 {
+                i as f64
+            } else {
+                i as f64 - n as f64
+            };
             for j in 0..nh {
                 let kyj = j as f64;
                 kx[[i, j]] = kxi;
                 ky[[i, j]] = kyj;
                 let k2 = kxi * kxi + kyj * kyj;
                 k2inv[[i, j]] = if k2 > 0.0 { 1.0 / k2 } else { 0.0 };
-                dealias[[i, j]] = if kxi.abs() <= cut && kyj <= cut { 1.0 } else { 0.0 };
+                dealias[[i, j]] = if kxi.abs() <= cut && kyj <= cut {
+                    1.0
+                } else {
+                    0.0
+                };
             }
         }
         Self {
@@ -134,7 +142,9 @@ impl Spectral2D {
             .and(&sy)
             .for_each(|a, &u, &v, &sx, &sy| *a = -(u * sx + v * sy));
         let mut nh = self.forward(&adv);
-        Zip::from(&mut nh).and(&self.dealias).for_each(|c, &m| *c *= m);
+        Zip::from(&mut nh)
+            .and(&self.dealias)
+            .for_each(|c, &m| *c *= m);
         nh
     }
 }
@@ -143,7 +153,11 @@ impl Spectral2D {
 fn integ_factor(s: &Spectral2D, coeff: f64, dt: f64) -> Array2<f64> {
     let mut e = Array2::<f64>::zeros((s.n, s.nh));
     for i in 0..s.n {
-        let kxi = if i <= s.n / 2 { i as f64 } else { i as f64 - s.n as f64 };
+        let kxi = if i <= s.n / 2 {
+            i as f64
+        } else {
+            i as f64 - s.n as f64
+        };
         for j in 0..s.nh {
             let k2 = kxi * kxi + (j as f64) * (j as f64);
             e[[i, j]] = (-coeff * k2 * dt).exp();
@@ -193,7 +207,18 @@ impl Sim {
         let ec2 = integ_factor(&spec, kappa, dt * 0.5);
         let n = spec.n();
         let v_jet = Array2::<f64>::zeros((n, n));
-        Self { spec, wh, gh, rh, dt, ew, ew2, ec, ec2, v_jet }
+        Self {
+            spec,
+            wh,
+            gh,
+            rh,
+            dt,
+            ew,
+            ew2,
+            ec,
+            ec2,
+            v_jet,
+        }
     }
 
     /// Set a steady downward jet: a smooth top-hat vertical strip of width
@@ -231,7 +256,11 @@ impl Sim {
             let (u, v) = s.velocity(w);
             let mut vd = v.clone();
             Zip::from(&mut vd).and(vjet).for_each(|vd, &vj| *vd += vj);
-            (s.advect(w, &u, &v), s.advect(g, &u, &vd), s.advect(r, &u, &vd))
+            (
+                s.advect(w, &u, &v),
+                s.advect(g, &u, &vd),
+                s.advect(r, &u, &vd),
+            )
         };
         // per-field stage builders (E = field's integrating factor)
         let st2 = |e2: &Array2<f64>, base: &Array2<C>, k: &Array2<C>| {
@@ -243,11 +272,18 @@ impl Sim {
         let st4 = |e: &Array2<f64>, e2: &Array2<f64>, base: &Array2<C>, k: &Array2<C>| {
             &scale(base, e) + &scale(k, e2).mapv(|c| c * dt)
         };
-        let fin = |e: &Array2<f64>, e2: &Array2<f64>, base: &Array2<C>,
-                   k1: &Array2<C>, k2: &Array2<C>, k3: &Array2<C>, k4: &Array2<C>| {
+        let fin = |e: &Array2<f64>,
+                   e2: &Array2<f64>,
+                   base: &Array2<C>,
+                   k1: &Array2<C>,
+                   k2: &Array2<C>,
+                   k3: &Array2<C>,
+                   k4: &Array2<C>| {
             let term = scale(k1, e) + scale(&(k2 + k3), e2).mapv(|c| c * 2.0) + k4;
             let mut out = scale(base, e);
-            Zip::from(&mut out).and(&term).for_each(|o, &t| *o += t * (dt / 6.0));
+            Zip::from(&mut out)
+                .and(&term)
+                .for_each(|o, &t| *o += t * (dt / 6.0));
             out
         };
 
@@ -308,7 +344,10 @@ pub fn co_rotating_vortices(
     let mut omega = Array2::<f64>::zeros((n, n));
     let mut gold = Array2::<f64>::zeros((n, n));
     let mut rust = Array2::<f64>::zeros((n, n));
-    let centres = [(cx - 0.5 * sep, cy, 1.0_f64), (cx + 0.5 * sep, cy, 0.97_f64)];
+    let centres = [
+        (cx - 0.5 * sep, cy, 1.0_f64),
+        (cx + 0.5 * sep, cy, 0.97_f64),
+    ];
     let rd = 1.1 * core;
     for i in 0..n {
         let x = i as f64 * dx;
@@ -331,7 +370,9 @@ pub fn co_rotating_vortices(
     if noise > 0.0 {
         let mut st = seed | 1;
         let mut rand = || {
-            st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            st = st
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (st >> 33) as f64 / (1u64 << 31) as f64 // [0, 2)
         };
         let (kmin, kmax) = (3.0, 10.0);
@@ -357,7 +398,11 @@ pub fn co_rotating_vortices(
             }
         }
     }
-    (spec.forward(&omega), spec.forward(&gold), spec.forward(&rust))
+    (
+        spec.forward(&omega),
+        spec.forward(&gold),
+        spec.forward(&rust),
+    )
 }
 
 /// Write the two dye densities to a PNG. On a black background gold + rust are
@@ -380,7 +425,11 @@ pub fn write_dye_png(gold: &Array2<f64>, rust: &Array2<f64>, path: &str, white_b
             let tot = g + r;
             let a = tot.min(1.0).powf(0.6); // opacity; lifts faint filaments
             for k in 0..3 {
-                let ink = if tot > 1e-6 { (gcol[k] * g + rcol[k] * r) / tot } else { 1.0 };
+                let ink = if tot > 1e-6 {
+                    (gcol[k] * g + rcol[k] * r) / tot
+                } else {
+                    1.0
+                };
                 let v = (1.0 - a) + ink * a; // composite over white
                 rgb[k] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             }

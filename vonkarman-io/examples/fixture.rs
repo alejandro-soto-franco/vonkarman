@@ -8,9 +8,9 @@
 //!   f_0001.vti    - frame 1 (timestep 0.5)
 //!   seq.pvd       - PVD collection listing f_0000.vti and f_0001.vti
 
-use std::path::PathBuf;
 use ndarray::Array3;
 use num_complex::Complex;
+use std::path::PathBuf;
 use vonkarman_core::domain::{DomainType, PhysicsParams, Snapshot};
 use vonkarman_core::field::{GridSpec, VectorField};
 use vonkarman_io::{write_pvd, write_vti};
@@ -65,10 +65,7 @@ fn main() {
     // PVD collection with relative paths
     write_pvd(
         &out_dir.join("seq.pvd"),
-        &[
-            (0.0, "f_0000.vti".into()),
-            (0.5, "f_0001.vti".into()),
-        ],
+        &[(0.0, "f_0000.vti".into()), (0.5, "f_0001.vti".into())],
     )
     .expect("write seq.pvd");
 

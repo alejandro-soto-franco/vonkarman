@@ -9,7 +9,10 @@ use std::time::Instant;
 use vonkarman_2d::{Sim, Spectral2D, co_rotating_vortices, write_dye_png};
 
 fn arg<T: std::str::FromStr>(i: usize, default: T) -> T {
-    std::env::args().nth(i).and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::args()
+        .nth(i)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn main() {
@@ -47,7 +50,12 @@ fn main() {
     for step in 0..=steps {
         if step % stride == 0 {
             let (gold, rust) = sim.dyes();
-            write_dye_png(&gold, &rust, &format!("{out}/f_{frame:05}.png"), white_bg != 0);
+            write_dye_png(
+                &gold,
+                &rust,
+                &format!("{out}/f_{frame:05}.png"),
+                white_bg != 0,
+            );
             frame += 1;
             if frame % 20 == 0 {
                 println!("  frame {frame} (step {step}, {:.0?})", t0.elapsed());
