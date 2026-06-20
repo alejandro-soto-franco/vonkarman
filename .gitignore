@@ -94,6 +94,13 @@ criterion/
 cachegrind.out.*
 callgrind.out.*
 
+# Large HIT3D benchmark data (purged from history; local copies in
+# ~/vonkarman-benchmark-data-backup). Regeneratable; never commit.
+benchmarks/hit3d/u.*
+benchmarks/hit3d/v.*
+benchmarks/hit3d/w.*
+benchmarks/hit3d/tg_*
+
 # ---------------------------------------------------------------------------
 # Environment / secrets
 # ---------------------------------------------------------------------------
