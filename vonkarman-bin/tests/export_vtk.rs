@@ -1,6 +1,7 @@
 //! Integration test for the export-vtk subcommand: author two synthetic
 //! spectral checkpoints, export them, and assert the .vti/.pvd outputs.
 
+use base64::Engine;
 use ndarray::Array3;
 use num_complex::Complex;
 use vonkarman_bin::export::export_vtk;
@@ -66,6 +67,51 @@ fn export_vtk_produces_frames_and_series() {
         body.contains(r#"Name="velocity""#),
         "vti missing velocity DataArray"
     );
+
+    // Decode the velocity DataArray's base64 payload and verify:
+    // - format is [u64 LE byte-length header][raw f64 LE data] (see vtk.rs encode_f64_le)
+    // - at least one decoded f64 is nonzero (proves nonzero data round-trips)
+    // - all decoded f64 values are finite
+    {
+        // Extract the base64 payload between Name="velocity" ... and the closing tag.
+        let vel_marker = r#"Name="velocity" NumberOfComponents="3" format="binary">"#;
+        let start = body.find(vel_marker).expect("velocity DataArray not found") + vel_marker.len();
+        let end = body[start..]
+            .find("</DataArray>")
+            .expect("closing DataArray tag not found")
+            + start;
+        let b64_payload = body[start..end].trim();
+
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(b64_payload)
+            .expect("base64 decode failed");
+
+        // First 8 bytes: u64 LE byte count of the data payload.
+        assert!(raw.len() >= 8, "decoded buffer too short for header");
+        let nbytes = u64::from_le_bytes(raw[0..8].try_into().unwrap()) as usize;
+        assert_eq!(
+            raw.len() - 8,
+            nbytes,
+            "byte-length header mismatch: header says {nbytes}, actual data = {}",
+            raw.len() - 8
+        );
+        assert_eq!(nbytes % 8, 0, "data payload not a multiple of 8 bytes");
+
+        let nf64 = nbytes / 8;
+        let mut any_nonzero = false;
+        for i in 0..nf64 {
+            let offset = 8 + i * 8;
+            let val = f64::from_le_bytes(raw[offset..offset + 8].try_into().unwrap());
+            assert!(val.is_finite(), "non-finite f64 at index {i}: {val}");
+            if val != 0.0 {
+                any_nonzero = true;
+            }
+        }
+        assert!(
+            any_nonzero,
+            "all velocity f64 values are zero - nonzero u_hat did not round-trip"
+        );
+    }
 
     // series.pvd exists and lists two timesteps mapping to the two frames.
     let pvd = std::fs::read_to_string(output.join("series.pvd")).unwrap();

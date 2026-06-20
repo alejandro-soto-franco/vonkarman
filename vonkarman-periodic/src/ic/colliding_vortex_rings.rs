@@ -241,35 +241,77 @@ mod tests {
 
     #[test]
     fn rings_two_cores() {
-        // Vorticity should concentrate in two toroidal shells offset along z.
-        // Check the energy-weighted mean |z - center| is near separation/2.
+        // Vorticity must concentrate in TWO rings separated along the z-axis.
+        // Test: reconstruct |omega| on the grid via spectral curl, then compute
+        // the |omega|-weighted mean of |z - z_center|. This must be close to
+        // separation/2 = 1.0 (within 35%), proving two cores offset along the
+        // axis rather than a single central blob.
+        let separation = 2.0_f64;
         let n = 48;
         let l = 2.0 * std::f64::consts::PI;
         let grid = GridSpec::cubic(n, l);
         let fft = create_backend(grid.nx, grid.ny, grid.nz, BackendMode::Cpu);
-        let v = colliding_vortex_rings(&grid, 1.0, 0.35, 1.0, 2.0, 2, fft.as_ref());
-        // Reconstruct |omega| via spectral curl is heavy; instead use |u| as a
-        // proxy: speed is largest near the two cores. Confirm two lobes by
-        // checking that the speed in the two z-halves around center is comparable.
-        let half = n / 2;
-        let mut e_low = 0.0;
-        let mut e_high = 0.0;
+        let v = colliding_vortex_rings(&grid, 1.0, 0.35, 1.0, separation, 2, fft.as_ref());
+
+        // Forward FFT velocity to spectral space.
+        let (snx, sny, snz) = grid.spectral_shape();
+        let mut u_hat: [Array3<Complex<f64>>; 3] = [
+            Array3::zeros((snx, sny, snz)),
+            Array3::zeros((snx, sny, snz)),
+            Array3::zeros((snx, sny, snz)),
+        ];
+        for c in 0..3 {
+            fft.r2c_3d(&v.data[c], &mut u_hat[c]);
+        }
+
+        // Compute curl in spectral space to get omega_hat.
+        let ops = SpectralOps::<f64>::new(&grid);
+        let mut omega_hat: [Array3<Complex<f64>>; 3] = [
+            Array3::zeros((snx, sny, snz)),
+            Array3::zeros((snx, sny, snz)),
+            Array3::zeros((snx, sny, snz)),
+        ];
+        ops.curl(&u_hat, &mut omega_hat);
+
+        // Inverse FFT omega_hat to get physical-space vorticity.
+        let mut omega_phys: [ndarray::Array3<f64>; 3] = [
+            ndarray::Array3::zeros((n, n, n)),
+            ndarray::Array3::zeros((n, n, n)),
+            ndarray::Array3::zeros((n, n, n)),
+        ];
+        for c in 0..3 {
+            fft.c2r_3d(&omega_hat[c], &mut omega_phys[c]);
+        }
+
+        // Compute |omega|-weighted mean of |z - z_center| along the propagation axis (z).
+        // axis=2 so z is the third index (k), with z_k = k * dz, z_center = l/2.
+        let dz = grid.dz();
+        let z_center = l / 2.0;
+        let mut weight_sum = 0.0_f64;
+        let mut weighted_dist_sum = 0.0_f64;
         for i in 0..n {
             for j in 0..n {
                 for k in 0..n {
-                    let s = v.data[0][[i, j, k]].powi(2)
-                        + v.data[1][[i, j, k]].powi(2)
-                        + v.data[2][[i, j, k]].powi(2);
-                    if k < half {
-                        e_low += s;
-                    } else {
-                        e_high += s;
-                    }
+                    let wx = omega_phys[0][[i, j, k]];
+                    let wy = omega_phys[1][[i, j, k]];
+                    let wz = omega_phys[2][[i, j, k]];
+                    let mag = (wx * wx + wy * wy + wz * wz).sqrt();
+                    let z_k = k as f64 * dz;
+                    let dist = (z_k - z_center).abs();
+                    weight_sum += mag;
+                    weighted_dist_sum += mag * dist;
                 }
             }
         }
-        assert!(e_low > 0.0 && e_high > 0.0);
-        let ratio = e_low / e_high;
-        assert!(ratio > 0.5 && ratio < 2.0, "lobes unbalanced: {ratio}");
+
+        assert!(weight_sum > 0.0, "total |omega| weight is zero");
+        let mean_axial_dist = weighted_dist_sum / weight_sum;
+        let expected = separation / 2.0;
+        let tol = 0.35 * expected;
+        assert!(
+            (mean_axial_dist - expected).abs() < tol,
+            "|omega|-weighted mean axial distance = {mean_axial_dist:.4}, expected {expected:.4} +/- {tol:.4}; \
+             vorticity is not concentrated in two cores offset by separation/2 along the axis"
+        );
     }
 }

@@ -76,7 +76,9 @@ pub fn export_vtk(input: &str, output: &str) -> Result<(), Box<dyn std::error::E
             grid,
             params: PhysicsParams {
                 nu: ckpt.nu,
-                re: 0.0,
+                // re is not persisted in checkpoints; derive from nu as Re = 1/nu
+                // (matching the run config convention where nu = 1/Re).
+                re: if ckpt.nu > 0.0 { 1.0 / ckpt.nu } else { 0.0 },
                 domain: DomainType::Periodic3D,
             },
         };
