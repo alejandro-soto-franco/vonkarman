@@ -86,6 +86,21 @@ pub fn write_vti(path: &Path, snapshot: &Snapshot<f64>) -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// Write a PVD (ParaView Data) time-series collection file that lists
+/// a sequence of timesteps and their corresponding relative file paths.
+pub fn write_pvd(path: &Path, entries: &[(f64, String)]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, r#"<?xml version="1.0"?>"#)?;
+    writeln!(f, r#"<VTKFile type="Collection" version="1.0" byte_order="LittleEndian">"#)?;
+    writeln!(f, r#"  <Collection>"#)?;
+    for (t, file) in entries {
+        writeln!(f, r#"    <DataSet timestep="{t}" group="" part="0" file="{file}"/>"#)?;
+    }
+    writeln!(f, r#"  </Collection>"#)?;
+    writeln!(f, r#"</VTKFile>"#)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +148,15 @@ mod tests {
         let body = std::fs::read_to_string(&tmp).unwrap();
         assert!(body.contains(r#"WholeExtent="0 3 0 3 0 3""#));
         assert!(body.contains(r#"Name="velocity""#));
+    }
+
+    #[test]
+    fn pvd_lists_timesteps() {
+        let tmp = std::env::temp_dir().join("ff_seq.pvd");
+        write_pvd(&tmp, &[(0.0, "f_0000.vti".into()), (0.5, "f_0001.vti".into())]).unwrap();
+        let body = std::fs::read_to_string(&tmp).unwrap();
+        assert!(body.contains(r#"timestep="0""#));
+        assert!(body.contains(r#"file="f_0001.vti""#));
+        assert!(body.contains("Collection"));
     }
 }
