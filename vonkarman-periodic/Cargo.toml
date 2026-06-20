@@ -20,6 +20,9 @@ serde = { workspace = true }
 # ComputeBackend, which lives in vonkarman-core).
 vonkarman-compute = { workspace = true, optional = true }
 
+[dev-dependencies]
+toml = "0.8"
+
 [features]
 default = []
 # Enables the GPU-resident SpectralState round trip (cuFFT on cuda-core buffers)

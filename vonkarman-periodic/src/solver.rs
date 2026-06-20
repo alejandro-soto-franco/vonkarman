@@ -65,6 +65,9 @@ impl Periodic3D {
                 energy,
                 seed,
             } => ic::random_isotropic(&grid, k_peak, energy, seed, fft.as_ref()),
+            IcType::CollidingVortexRings { .. } => {
+                unimplemented!("colliding rings: implemented in Task 2/3")
+            }
         };
         let mut u_hat: [Array3<Complex<f64>>; 3] = [
             Array3::zeros(shape),

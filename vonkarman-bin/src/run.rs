@@ -44,6 +44,9 @@ pub fn run(
                 separation: 1.0,
                 perturbation: 0.1,
             },
+            "colliding-vortex-rings" => {
+                unimplemented!("colliding rings: implemented in Task 2/3")
+            }
             other => return Err(format!("unknown IC type: {other}").into()),
         };
         Periodic3D::new(grid, nu, ic, backend_mode)
