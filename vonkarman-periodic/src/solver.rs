@@ -6,6 +6,7 @@ use num_complex::Complex;
 use vonkarman_core::domain::{Domain, DomainType, PhysicsParams, Snapshot};
 use vonkarman_core::field::{GridSpec, VectorField};
 use vonkarman_core::spectral_ops::SpectralOps;
+use vonkarman_diag::FrameDiagnostics;
 use vonkarman_fft::{BackendMode, FftBackend, create_backend};
 
 /// 3D pseudospectral Navier-Stokes solver on the periodic torus T^3.
@@ -628,6 +629,174 @@ impl Domain<f64> for Periodic3D {
             u_hat: self.u_hat.clone(),
             grid: self.grid,
             params: self.params,
+        }
+    }
+}
+
+impl Periodic3D {
+    /// Frame / coherence / pressure diagnostics for the Clifford-NS regularity
+    /// programme: the frame-projected pressure occupancy rho = ||alpha_p|| / ||f||
+    /// (alpha_p = -xi_i xi_j R_i R_j f, f = |S|^2 - 1/2 |omega|^2), the vector vs
+    /// nematic coherence energies (defect-honesty of Xi = xi (x) xi), and the
+    /// omega_Xi_crit density <|omega|^{1/2} |grad Xi|^2>. Heavy (order 50 FFTs), so it
+    /// is meant to run at the diagnostics cadence, not every step. Physics in
+    /// `vonkarman_diag::frame`.
+    pub fn frame_diagnostics(&self) -> FrameDiagnostics {
+        let (snx, sny, snz) = self.grid.spectral_shape();
+        let pshape = (self.grid.nx, self.grid.ny, self.grid.nz);
+        let sshape = (snx, sny, snz);
+        let n3 = (self.grid.nx * self.grid.ny * self.grid.nz) as f64;
+        let zero = Complex { re: 0.0, im: 0.0 };
+
+        // d/dx_j of a spectral field, returned in physical space (i k_j, then inverse).
+        let deriv = |a_hat: &Array3<Complex<f64>>, j: usize| -> Array3<f64> {
+            let mut d_hat = Array3::from_elem(sshape, zero);
+            for ix in 0..snx {
+                for iy in 0..sny {
+                    for iz in 0..snz {
+                        let k = match j {
+                            0 => self.ops.kx[ix],
+                            1 => self.ops.ky[iy],
+                            _ => self.ops.kz[iz],
+                        };
+                        let a = a_hat[[ix, iy, iz]];
+                        d_hat[[ix, iy, iz]] = Complex {
+                            re: -k * a.im,
+                            im: k * a.re,
+                        };
+                    }
+                }
+            }
+            let mut out = Array3::zeros(pshape);
+            self.fft.c2r_3d(&d_hat, &mut out);
+            out
+        };
+        let fwd = |field: &Array3<f64>| -> Array3<Complex<f64>> {
+            let mut h = Array3::from_elem(sshape, zero);
+            self.fft.r2c_3d(field, &mut h);
+            h
+        };
+
+        // vorticity (physical), magnitude and direction xi = omega / |omega|
+        let mut omega_hat: [Array3<Complex<f64>>; 3] =
+            std::array::from_fn(|_| Array3::from_elem(sshape, zero));
+        self.ops.curl(&self.u_hat, &mut omega_hat);
+        let omega: [Array3<f64>; 3] = std::array::from_fn(|c| {
+            let mut o = Array3::zeros(pshape);
+            self.fft.c2r_3d(&omega_hat[c], &mut o);
+            o
+        });
+        let mut w2 = Array3::<f64>::zeros(pshape);
+        for c in 0..3 {
+            w2 += &omega[c].mapv(|x| x * x);
+        }
+        let wmag = w2.mapv(f64::sqrt);
+        let wmax = wmag.iter().cloned().fold(0.0_f64, f64::max);
+        let eps = 1e-6 * wmax.max(1e-30);
+        let xi: [Array3<f64>; 3] = std::array::from_fn(|c| {
+            let denom = wmag.mapv(|w| w + eps);
+            &omega[c] / &denom
+        });
+
+        // strain magnitude and the CLMS null form f = |S|^2 - 1/2 |omega|^2
+        let gradu: [[Array3<f64>; 3]; 3] =
+            std::array::from_fn(|i| std::array::from_fn(|j| deriv(&self.u_hat[i], j)));
+        let mut s2 = Array3::<f64>::zeros(pshape);
+        for i in 0..3 {
+            for j in 0..3 {
+                let s = (&gradu[i][j] + &gradu[j][i]).mapv(|x| 0.5 * x);
+                s2 += &s.mapv(|x| x * x);
+            }
+        }
+        let f = &s2 - &w2.mapv(|x| 0.5 * x);
+
+        // frame-projected pressure alpha_p = - xi_i xi_j R_i R_j f
+        let f_hat = fwd(&f);
+        let mut alpha_p = Array3::<f64>::zeros(pshape);
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut rrf_hat = Array3::from_elem(sshape, zero);
+                for ix in 0..snx {
+                    for iy in 0..sny {
+                        for iz in 0..snz {
+                            let k2 = self.ops.k_mag_sq[[ix, iy, iz]];
+                            if k2 < 1e-30 {
+                                continue;
+                            }
+                            let ki = match i {
+                                0 => self.ops.kx[ix],
+                                1 => self.ops.ky[iy],
+                                _ => self.ops.kz[iz],
+                            };
+                            let kj = match j {
+                                0 => self.ops.kx[ix],
+                                1 => self.ops.ky[iy],
+                                _ => self.ops.kz[iz],
+                            };
+                            let m = ki * kj / k2;
+                            let fh = f_hat[[ix, iy, iz]];
+                            rrf_hat[[ix, iy, iz]] = Complex {
+                                re: m * fh.re,
+                                im: m * fh.im,
+                            };
+                        }
+                    }
+                }
+                let mut rrf = Array3::zeros(pshape);
+                self.fft.c2r_3d(&rrf_hat, &mut rrf);
+                let term = (&xi[i] * &xi[j]) * &rrf; // xi_i xi_j (R_i R_j f)
+                alpha_p -= &term;
+            }
+        }
+
+        // coherence energies: vector <|grad xi|^2>, nematic <|grad Xi|^2>
+        let mut gxi2 = Array3::<f64>::zeros(pshape);
+        for c in 0..3 {
+            let xh = fwd(&xi[c]);
+            for j in 0..3 {
+                let d = deriv(&xh, j);
+                gxi2 += &d.mapv(|x| x * x);
+            }
+        }
+        let mut gnem2 = Array3::<f64>::zeros(pshape);
+        for a in 0..3 {
+            for b in a..3 {
+                let xab = &xi[a] * &xi[b];
+                let xh = fwd(&xab);
+                let wt = if a == b { 1.0 } else { 2.0 }; // off-diagonal counted twice
+                for j in 0..3 {
+                    let d = deriv(&xh, j);
+                    gnem2 += &d.mapv(|x| wt * x * x);
+                }
+            }
+        }
+
+        // reductions (means over the physical grid; _hi over the high-|omega| region)
+        let mean = |arr: &Array3<f64>| arr.sum() / n3;
+        let rms = |arr: &Array3<f64>| (arr.mapv(|x| x * x).sum() / n3).sqrt();
+        let thresh = 0.3 * wmax;
+        let mask: Array3<f64> = wmag.mapv(|w| if w > thresh { 1.0_f64 } else { 0.0 });
+        let mcount = mask.sum().max(1.0);
+        let masked_rms = |arr: &Array3<f64>| ((&arr.mapv(|x| x * x) * &mask).sum() / mcount).sqrt();
+        let masked_mean = |arr: &Array3<f64>| (arr * &mask).sum() / mcount;
+
+        let f_rms = rms(&f);
+        let alpha_p_rms = rms(&alpha_p);
+        FrameDiagnostics {
+            time: self.time,
+            step: self.step_count,
+            enstrophy: mean(&w2),
+            max_vorticity: wmax,
+            f_rms,
+            alpha_p_rms,
+            rho_all: alpha_p_rms / (f_rms + 1e-30),
+            rho_hi: masked_rms(&alpha_p) / (masked_rms(&f) + 1e-30),
+            xi_energy: mean(&gxi2),
+            nem_energy: mean(&gnem2),
+            xi_energy_hi: masked_mean(&gxi2),
+            nem_energy_hi: masked_mean(&gnem2),
+            coherence_w: mean(&(&wmag.mapv(f64::sqrt) * &gnem2)),
+            hi_fraction: mask.sum() / n3,
         }
     }
 }

@@ -1,5 +1,6 @@
 mod config;
 mod diagnostics_writer;
+mod frame_writer;
 mod run;
 mod validate;
 

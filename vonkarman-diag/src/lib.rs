@@ -1,9 +1,11 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod audit;
+pub mod frame;
 pub mod scalar;
 pub mod spectrum;
 
 pub use audit::{ConservationAudit, Violation};
+pub use frame::FrameDiagnostics;
 pub use scalar::ScalarDiagnostics;
 pub use spectrum::{compensated_spectrum, dissipation_spectrum, energy_spectrum};

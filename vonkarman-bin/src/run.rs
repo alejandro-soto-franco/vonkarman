@@ -1,5 +1,6 @@
 use crate::config::ExperimentConfig;
 use crate::diagnostics_writer::DiagnosticsWriter;
+use crate::frame_writer::FrameWriter;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,6 +79,19 @@ pub fn run(
         .unwrap_or(true);
     let mut audit = ConservationAudit::new();
 
+    let frame_enabled = config
+        .diagnostics
+        .as_ref()
+        .map(|d| d.frame_diagnostics)
+        .unwrap_or(false);
+    let mut frame_writer = if frame_enabled {
+        let p = output_dir.join("frame_diagnostics.csv");
+        info!(path = %p.display(), "frame diagnostics enabled");
+        Some(FrameWriter::new(&p)?)
+    } else {
+        None
+    };
+
     let max_steps = config.termination.max_steps.unwrap_or(u64::MAX);
     let max_time = config.termination.max_time.unwrap_or(f64::INFINITY);
     let max_wall_hours = config.termination.max_wall_hours.unwrap_or(f64::INFINITY);
@@ -105,6 +119,9 @@ pub fn run(
     // Write initial diagnostics
     let diag = ScalarDiagnostics::from_domain(&solver);
     writer.write_row(&diag)?;
+    if let Some(fw) = frame_writer.as_mut() {
+        fw.write_row(&solver.frame_diagnostics())?;
+    }
     info!(
         step = 0,
         energy = diag.energy,
@@ -132,6 +149,10 @@ pub fn run(
 
             if audit_enabled {
                 audit.check_diagnostics(&diag, nu);
+            }
+
+            if let Some(fw) = frame_writer.as_mut() {
+                fw.write_row(&solver.frame_diagnostics())?;
             }
 
             if step.is_multiple_of(100) {
@@ -199,6 +220,9 @@ pub fn run(
 
     // Finalize
     writer.finish()?;
+    if let Some(fw) = frame_writer {
+        fw.finish()?;
+    }
 
     if audit.has_violations() {
         warn!(

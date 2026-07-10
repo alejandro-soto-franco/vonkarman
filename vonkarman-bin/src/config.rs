@@ -105,6 +105,9 @@ fn default_checkpoint_interval() -> u64 {
 pub struct DiagnosticsConfig {
     #[serde(default)]
     pub conservation_audit: bool,
+    /// Emit the frame / coherence / pressure diagnostics CSV (Clifford-NS programme).
+    #[serde(default)]
+    pub frame_diagnostics: bool,
 }
 
 #[derive(Debug, Deserialize)]

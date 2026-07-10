@@ -9,6 +9,7 @@ description = "Periodic 3D pseudospectral Navier-Stokes solver"
 vonkarman-core = { workspace = true }
 vonkarman-fft = { workspace = true }
 vonkarman-io = { workspace = true }
+vonkarman-diag = { workspace = true }
 ndarray = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }
