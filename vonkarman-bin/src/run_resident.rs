@@ -63,10 +63,10 @@ pub fn run_resident(config: &ExperimentConfig) -> Result<(), Box<dyn std::error:
     drop(seed);
     let mut solver = ResidentSolver::new(backend, grid, nu, &u_hat_flat);
 
-    // Host-side machinery for the periodic frame diagnostics (CPU FFT; the heavy
-    // stepping stays on the GPU, only the diagnostic snapshots come to the host).
+    // Host-side machinery for the periodic frame diagnostics. The heavy stepping
+    // stays on the GPU; only the diagnostic snapshots come to the host, where the
+    // ~22 diagnostic FFTs run in parallel across cores (frame_diagnostics_uhat).
     let ops = SpectralOps::<f64>::new(&grid);
-    let host_fft = vonkarman_fft::create_backend(grid.nx, grid.ny, grid.nz, BackendMode::Cpu);
     let (snx, sny, snz) = grid.spectral_shape();
     let cplx_len = snx * sny * snz;
     let mut host: [Vec<Complex<f64>>; 3] = [
@@ -127,7 +127,7 @@ pub fn run_resident(config: &ExperimentConfig) -> Result<(), Box<dyn std::error:
     if frame_enabled {
         solver.download_u_hat_all(&mut host);
         let arr = to_arr(&host);
-        let fd = frame_diagnostics_uhat(&arr, &ops, host_fft.as_ref(), &grid, time, step);
+        let fd = frame_diagnostics_uhat(&arr, &ops, &grid, time, step);
         info!(
             step = 0,
             enstrophy = fd.enstrophy,
@@ -148,7 +148,7 @@ pub fn run_resident(config: &ExperimentConfig) -> Result<(), Box<dyn std::error:
         if step.is_multiple_of(diag_interval) && frame_enabled {
             solver.download_u_hat_all(&mut host);
             let arr = to_arr(&host);
-            let fd = frame_diagnostics_uhat(&arr, &ops, host_fft.as_ref(), &grid, time, step);
+            let fd = frame_diagnostics_uhat(&arr, &ops, &grid, time, step);
             if let Some(fw) = frame_writer.as_mut() {
                 fw.write_row(&fd)?;
             }

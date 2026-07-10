@@ -636,14 +636,7 @@ impl Domain<f64> for Periodic3D {
 impl Periodic3D {
     /// Frame / coherence / pressure diagnostics (see `frame_diagnostics_uhat`).
     pub fn frame_diagnostics(&self) -> FrameDiagnostics {
-        frame_diagnostics_uhat(
-            &self.u_hat,
-            &self.ops,
-            self.fft.as_ref(),
-            &self.grid,
-            self.time,
-            self.step_count,
-        )
+        frame_diagnostics_uhat(&self.u_hat, &self.ops, &self.grid, self.time, self.step_count)
     }
 }
 
@@ -657,20 +650,38 @@ impl Periodic3D {
 pub fn frame_diagnostics_uhat(
     u_hat: &[Array3<Complex<f64>>; 3],
     ops: &SpectralOps<f64>,
-    fft: &dyn FftBackend<f64>,
     grid: &GridSpec,
     time: f64,
     step: u64,
 ) -> FrameDiagnostics {
+    use rayon::prelude::*;
+    use vonkarman_fft::NdrustfftBackend;
+
     let (snx, sny, snz) = grid.spectral_shape();
     let pshape = (grid.nx, grid.ny, grid.nz);
     let sshape = (snx, sny, snz);
+    let (nx, ny, nz) = pshape;
     let n3 = (grid.nx * grid.ny * grid.nz) as f64;
     let zero = Complex { re: 0.0, im: 0.0 };
 
-    // d/dx_j of a spectral field, returned in physical space (i k_j, then inverse).
-    let deriv = |a_hat: &Array3<Complex<f64>>, j: usize| -> Array3<f64> {
-        let mut d_hat = Array3::from_elem(sshape, zero);
+    // Parallel inverse FFTs: this diagnostic needs ~22 independent transforms; run
+    // them across cores (each on its own cheap backend, which has no shared mutable
+    // state) instead of serially -- the serial CPU FFTs were the diagnostic
+    // bottleneck at n=256, while the GPU-resident solver does the stepping.
+    let par_c2r = |inputs: Vec<Array3<Complex<f64>>>| -> Vec<Array3<f64>> {
+        inputs
+            .into_par_iter()
+            .map(|inp| {
+                let local = NdrustfftBackend::new(nx, ny, nz);
+                let mut out = Array3::<f64>::zeros(pshape);
+                local.c2r_3d(&inp, &mut out);
+                out
+            })
+            .collect()
+    };
+    // i k_j * a_hat (spectral derivative; inverse-transformed later in a batch).
+    let deriv_hat = |a_hat: &Array3<Complex<f64>>, j: usize| -> Array3<Complex<f64>> {
+        let mut d = Array3::from_elem(sshape, zero);
         for ix in 0..snx {
             for iy in 0..sny {
                 for iz in 0..snz {
@@ -680,32 +691,33 @@ pub fn frame_diagnostics_uhat(
                         _ => ops.kz[iz],
                     };
                     let a = a_hat[[ix, iy, iz]];
-                    d_hat[[ix, iy, iz]] = Complex {
+                    d[[ix, iy, iz]] = Complex {
                         re: -k * a.im,
                         im: k * a.re,
                     };
                 }
             }
         }
-        let mut out = Array3::zeros(pshape);
-        fft.c2r_3d(&d_hat, &mut out);
-        out
-    };
-    let fwd = |field: &Array3<f64>| -> Array3<Complex<f64>> {
-        let mut h = Array3::from_elem(sshape, zero);
-        fft.r2c_3d(field, &mut h);
-        h
+        d
     };
 
-    // vorticity (physical), magnitude and direction xi = omega / |omega|
+    // Batch 1: vorticity (3) + velocity gradients (9), inverse-transformed together.
     let mut omega_hat: [Array3<Complex<f64>>; 3] =
         std::array::from_fn(|_| Array3::from_elem(sshape, zero));
     ops.curl(u_hat, &mut omega_hat);
-    let omega: [Array3<f64>; 3] = std::array::from_fn(|c| {
-        let mut o = Array3::zeros(pshape);
-        fft.c2r_3d(&omega_hat[c], &mut o);
-        o
-    });
+    let mut batch1: Vec<Array3<Complex<f64>>> = Vec::with_capacity(12);
+    for c in 0..3 {
+        batch1.push(omega_hat[c].clone());
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            batch1.push(deriv_hat(&u_hat[i], j));
+        }
+    }
+    let phys1 = par_c2r(batch1);
+    let omega: [&Array3<f64>; 3] = [&phys1[0], &phys1[1], &phys1[2]];
+    let gradu = |i: usize, j: usize| -> &Array3<f64> { &phys1[3 + i * 3 + j] };
+
     let mut w2 = Array3::<f64>::zeros(pshape);
     for c in 0..3 {
         w2 += &omega[c].mapv(|x| x * x);
@@ -715,24 +727,28 @@ pub fn frame_diagnostics_uhat(
     let eps = 1e-6 * wmax.max(1e-30);
     let xi: [Array3<f64>; 3] = std::array::from_fn(|c| {
         let denom = wmag.mapv(|w| w + eps);
-        &omega[c] / &denom
+        omega[c] / &denom
     });
 
     // strain magnitude and the CLMS null form f = |S|^2 - 1/2 |omega|^2
-    let gradu: [[Array3<f64>; 3]; 3] =
-        std::array::from_fn(|i| std::array::from_fn(|j| deriv(&u_hat[i], j)));
     let mut s2 = Array3::<f64>::zeros(pshape);
     for i in 0..3 {
         for j in 0..3 {
-            let s = (&gradu[i][j] + &gradu[j][i]).mapv(|x| 0.5 * x);
+            let s = (gradu(i, j) + gradu(j, i)).mapv(|x| 0.5 * x);
             s2 += &s.mapv(|x| x * x);
         }
     }
     let f = &s2 - &w2.mapv(|x| 0.5 * x);
 
     // frame-projected pressure alpha_p = - xi_i xi_j R_i R_j f
-    let f_hat = fwd(&f);
-    let mut alpha_p = Array3::<f64>::zeros(pshape);
+    let f_hat = {
+        let local = NdrustfftBackend::new(nx, ny, nz);
+        let mut h = Array3::from_elem(sshape, zero);
+        local.r2c_3d(&f, &mut h);
+        h
+    };
+    // Batch 2: the 9 Riesz-projected pressure components R_i R_j f = ifft(k_i k_j/|k|^2 f_hat).
+    let mut batch2: Vec<Array3<Complex<f64>>> = Vec::with_capacity(9);
     for i in 0..3 {
         for j in 0..3 {
             let mut rrf_hat = Array3::from_elem(sshape, zero);
@@ -762,9 +778,14 @@ pub fn frame_diagnostics_uhat(
                     }
                 }
             }
-            let mut rrf = Array3::zeros(pshape);
-            fft.c2r_3d(&rrf_hat, &mut rrf);
-            let term = (&xi[i] * &xi[j]) * &rrf; // xi_i xi_j (R_i R_j f)
+            batch2.push(rrf_hat);
+        }
+    }
+    let rrf = par_c2r(batch2);
+    let mut alpha_p = Array3::<f64>::zeros(pshape);
+    for i in 0..3 {
+        for j in 0..3 {
+            let term = (&xi[i] * &xi[j]) * &rrf[i * 3 + j]; // xi_i xi_j (R_i R_j f)
             alpha_p -= &term;
         }
     }
