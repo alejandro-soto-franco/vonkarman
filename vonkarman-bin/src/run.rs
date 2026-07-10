@@ -14,10 +14,30 @@ use vonkarman_fft::BackendMode;
 use vonkarman_io::write_checkpoint;
 use vonkarman_periodic::{IcType, Periodic3D};
 
+/// Dispatch to the GPU-resident run path (compiled only with `--features cuda`).
+fn run_resident_dispatch(config: &ExperimentConfig) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "cuda")]
+    {
+        crate::run_resident::run_resident(config)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = config;
+        Err(
+            "resident GPU path ([domain] resident = true) requires building with \
+             --features cuda (nightly toolchain + CUDA toolkit)"
+                .into(),
+        )
+    }
+}
+
 pub fn run(
     config: &ExperimentConfig,
     restart: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if config.domain.resident {
+        return run_resident_dispatch(config);
+    }
     let grid = GridSpec::cubic(config.domain.n, config.domain.l);
     let nu = config.physics.nu;
 

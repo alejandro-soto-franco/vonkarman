@@ -2,6 +2,8 @@ mod config;
 mod diagnostics_writer;
 mod frame_writer;
 mod run;
+#[cfg(feature = "cuda")]
+mod run_resident;
 mod validate;
 
 use clap::{Parser, Subcommand};

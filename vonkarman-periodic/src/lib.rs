@@ -11,7 +11,7 @@ pub mod solver;
 pub mod state;
 
 pub use ic::IcType;
-pub use solver::Periodic3D;
+pub use solver::{Periodic3D, frame_diagnostics_uhat};
 pub use state::{SpectralState, StateDims};
 
 #[cfg(feature = "cuda")]

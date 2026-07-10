@@ -1,5 +1,5 @@
 use crate::backend::FftBackend;
-use ndarray::Array3;
+use ndarray::{Array3, Zip};
 use num_complex::Complex;
 use vonkarman_core::field::GridSpec;
 
@@ -45,7 +45,7 @@ pub fn dealiased_cross_product(
     for c in 0..3 {
         let mut padded_hat = Array3::<Complex<f64>>::zeros((pnx, pny, pnz_half));
         zero_pad_spectral(&u_hat[c], &mut padded_hat, grid.nx, grid.ny);
-        padded_hat.mapv_inplace(|v| Complex {
+        padded_hat.par_mapv_inplace(|v| Complex {
             re: v.re * scale,
             im: v.im * scale,
         });
@@ -54,7 +54,7 @@ pub fn dealiased_cross_product(
     for c in 0..3 {
         let mut padded_hat = Array3::<Complex<f64>>::zeros((pnx, pny, pnz_half));
         zero_pad_spectral(&omega_hat[c], &mut padded_hat, grid.nx, grid.ny);
-        padded_hat.mapv_inplace(|v| Complex {
+        padded_hat.par_mapv_inplace(|v| Complex {
             re: v.re * scale,
             im: v.im * scale,
         });
@@ -67,21 +67,26 @@ pub fn dealiased_cross_product(
         Array3::<f64>::zeros((pg.nx, pg.ny, pg.nz)),
         Array3::<f64>::zeros((pg.nx, pg.ny, pg.nz)),
     ];
-    for i in 0..pg.nx {
-        for j in 0..pg.ny {
-            for k in 0..pg.nz {
-                let ux = u_phys[0][[i, j, k]];
-                let uy = u_phys[1][[i, j, k]];
-                let uz = u_phys[2][[i, j, k]];
-                let ox = omega_phys[0][[i, j, k]];
-                let oy = omega_phys[1][[i, j, k]];
-                let oz = omega_phys[2][[i, j, k]];
-                cross_phys[0][[i, j, k]] = uy * oz - uz * oy;
-                cross_phys[1][[i, j, k]] = uz * ox - ux * oz;
-                cross_phys[2][[i, j, k]] = ux * oy - uy * ox;
-            }
-        }
-    }
+    // (u x omega) componentwise; each component is an independent element-wise map
+    // over the padded grid (~(3N/2)^3 points), parallelised across cores.
+    Zip::from(&mut cross_phys[0])
+        .and(&u_phys[1])
+        .and(&u_phys[2])
+        .and(&omega_phys[1])
+        .and(&omega_phys[2])
+        .par_for_each(|c, &uy, &uz, &oy, &oz| *c = uy * oz - uz * oy);
+    Zip::from(&mut cross_phys[1])
+        .and(&u_phys[2])
+        .and(&u_phys[0])
+        .and(&omega_phys[2])
+        .and(&omega_phys[0])
+        .par_for_each(|c, &uz, &ux, &oz, &ox| *c = uz * ox - ux * oz);
+    Zip::from(&mut cross_phys[2])
+        .and(&u_phys[0])
+        .and(&u_phys[1])
+        .and(&omega_phys[0])
+        .and(&omega_phys[1])
+        .par_for_each(|c, &ux, &uy, &ox, &oy| *c = ux * oy - uy * ox);
 
     // Step 4: forward FFT of cross product
     let mut cross_hat_padded = [
@@ -102,7 +107,7 @@ pub fn dealiased_cross_product(
     let inv_scale = 1.0 / scale;
     for c in 0..3 {
         truncate_spectral(&cross_hat_padded[c], &mut result_hat[c], grid.nx, grid.ny);
-        result_hat[c].mapv_inplace(|v| Complex {
+        result_hat[c].par_mapv_inplace(|v| Complex {
             re: v.re * inv_scale,
             im: v.im * inv_scale,
         });

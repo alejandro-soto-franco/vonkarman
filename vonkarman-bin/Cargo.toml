@@ -19,6 +19,8 @@ vonkarman-core = { workspace = true }
 vonkarman-fft = { workspace = true }
 vonkarman-periodic = { workspace = true }
 vonkarman-diag = { workspace = true }
+# GPU-resident run path (nightly + CUDA toolkit), behind the `cuda` feature.
+vonkarman-compute = { workspace = true, optional = true }
 ndarray = { workspace = true }
 num-complex = { workspace = true }
 serde = { workspace = true }
@@ -32,6 +34,12 @@ arrow = { version = "55", default-features = false }
 parquet = { version = "55", features = ["arrow"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+
+[features]
+default = []
+# GPU-resident solver path: `vonkarman run` with `[domain] resident = true`.
+# Requires a nightly toolchain and the CUDA toolkit (cuda-oxide dependency).
+cuda = ["dep:vonkarman-compute", "vonkarman-periodic/cuda"]
 
 [dev-dependencies]
 base64 = "0.22"

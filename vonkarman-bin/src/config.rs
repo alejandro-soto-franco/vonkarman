@@ -34,6 +34,9 @@ pub struct DomainConfig {
     /// FFT backend: "auto" (default), "cufft", or "cpu".
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Use the GPU-resident solver path (requires the `cuda` build feature).
+    #[serde(default)]
+    pub resident: bool,
 }
 
 fn default_backend() -> String {
