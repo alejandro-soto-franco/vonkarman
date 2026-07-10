@@ -1,7 +1,7 @@
 use crate::etd::EtdCoeffs;
 use crate::ic::{self, IcType};
 use crate::nonlinear::compute_nonlinear;
-use ndarray::Array3;
+use ndarray::{Array3, Zip};
 use num_complex::Complex;
 use vonkarman_core::domain::{Domain, DomainType, PhysicsParams, Snapshot};
 use vonkarman_core::field::{GridSpec, VectorField};
@@ -769,25 +769,25 @@ pub fn frame_diagnostics_uhat(
         }
     }
 
-    // coherence energies: vector <|grad xi|^2>, nematic <|grad Xi|^2>
+    // Coherence energies via PERIODIC FINITE DIFFERENCES (physical space): the
+    // direction xi = omega/|omega| is NOT band-limited, so a spectral derivative of
+    // xi (or Xi = xi (x) xi) aliases -- the aliasing grows with the small-scale
+    // content and makes <|grad Xi|^2> unmeasurable (it appears to blow up with
+    // resolution). Second-order central differences are the non-aliased,
+    // resolution-convergent measure of the direction-gradient energy, and they also
+    // remove ~36 FFTs from this diagnostic. Vector <|grad xi|^2> and nematic
+    // <|grad Xi|^2>, Xi_ab = xi_a xi_b (off-diagonal counted twice).
+    let dx = grid.dx();
     let mut gxi2 = Array3::<f64>::zeros(pshape);
     for c in 0..3 {
-        let xh = fwd(&xi[c]);
-        for j in 0..3 {
-            let d = deriv(&xh, j);
-            gxi2 += &d.mapv(|x| x * x);
-        }
+        gxi2 += &grad_sq_periodic(&xi[c], dx);
     }
     let mut gnem2 = Array3::<f64>::zeros(pshape);
     for a in 0..3 {
         for b in a..3 {
             let xab = &xi[a] * &xi[b];
-            let xh = fwd(&xab);
-            let wt = if a == b { 1.0 } else { 2.0 }; // off-diagonal counted twice
-            for j in 0..3 {
-                let d = deriv(&xh, j);
-                gnem2 += &d.mapv(|x| wt * x * x);
-            }
+            let wt = if a == b { 1.0 } else { 2.0 };
+            gnem2 += &grad_sq_periodic(&xab, dx).mapv(|v| wt * v);
         }
     }
 
@@ -818,6 +818,32 @@ pub fn frame_diagnostics_uhat(
         coherence_w: mean(&(&wmag.mapv(f64::sqrt) * &gnem2)),
         hi_fraction: mask.sum() / n3,
     }
+}
+
+/// `|grad field|^2` by second-order periodic central differences (physical space),
+/// parallelised across the grid. Used for the coherence energies: the direction
+/// field is not band-limited, so a spectral derivative would alias; finite
+/// differences give the non-aliased, resolution-convergent gradient energy.
+fn grad_sq_periodic(field: &Array3<f64>, dx: f64) -> Array3<f64> {
+    let (nx, ny, nz) = field.dim();
+    let inv = 1.0 / (2.0 * dx);
+    let mut out = Array3::<f64>::zeros((nx, ny, nz));
+    Zip::indexed(&mut out).par_for_each(|(i, j, k), o| {
+        let ip = if i + 1 == nx { 0 } else { i + 1 };
+        let im = if i == 0 { nx - 1 } else { i - 1 };
+        let jp = if j + 1 == ny { 0 } else { j + 1 };
+        let jm = if j == 0 { ny - 1 } else { j - 1 };
+        let kp = if k + 1 == nz { 0 } else { k + 1 };
+        let km = if k == 0 { nz - 1 } else { k - 1 };
+        // SAFETY: ip/im/jp/jm/kp/km are all in [0, n) for their axis by construction.
+        unsafe {
+            let dfx = (*field.uget([ip, j, k]) - *field.uget([im, j, k])) * inv;
+            let dfy = (*field.uget([i, jp, k]) - *field.uget([i, jm, k])) * inv;
+            let dfz = (*field.uget([i, j, kp]) - *field.uget([i, j, km])) * inv;
+            *o = dfx * dfx + dfy * dfy + dfz * dfz;
+        }
+    });
+    out
 }
 
 #[cfg(test)]
