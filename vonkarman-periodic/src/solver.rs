@@ -729,10 +729,26 @@ pub fn frame_diagnostics_uhat(
             batch1.push(deriv_hat(&omega_hat[i], j));
         }
     }
+    // Vorticity Laplacians, for the second-order structure scale l3 = Sqrt(rho/|Lap omega|).
+    // Symbol -|k|^2, so three transforms and no derivative composition.
+    for i in 0..3 {
+        let mut lh = Array3::from_elem(sshape, zero);
+        for ix in 0..snx {
+            for iy in 0..sny {
+                for iz in 0..snz {
+                    let k2 = ops.k_mag_sq[[ix, iy, iz]];
+                    let a = omega_hat[i][[ix, iy, iz]];
+                    lh[[ix, iy, iz]] = Complex { re: -k2 * a.re, im: -k2 * a.im };
+                }
+            }
+        }
+        batch1.push(lh);
+    }
     let phys1 = par_c2r(batch1);
     let omega: [&Array3<f64>; 3] = [&phys1[0], &phys1[1], &phys1[2]];
     let gradu = |i: usize, j: usize| -> &Array3<f64> { &phys1[3 + i * 3 + j] };
     let gradw = |i: usize, j: usize| -> &Array3<f64> { &phys1[12 + i * 3 + j] };
+    let lapw = |i: usize| -> &Array3<f64> { &phys1[21 + i] };
 
     let mut w2 = Array3::<f64>::zeros(pshape);
     for c in 0..3 {
@@ -1058,6 +1074,64 @@ pub fn frame_diagnostics_uhat(
     // as sum(rho^2 alpha)/sum(rho^3) over the bin. Its slope tests the assumption that
     // Ghat is amplitude-flat; the length separation l/l_nu ~ rho^e then has
     // e = (slope - Ghat slope)/2, which is the viscous-length statement itself.
+    // THREE INDEPENDENT STRUCTURE SCALES, to test whether e is physical or definitional.
+    //   l1 = rho/|grad omega|        first order, mixes modulus and director
+    //   l2 = rho/|grad rho|          first order, MODULUS ONLY, independent of the director
+    //   l3 = Sqrt(rho/|Lap omega|)   SECOND order, independent of both first-order forms
+    // Each is compared to l_nu = Sqrt(nu/rho) pointwise and averaged per bin, so e_i is the
+    // exponent in <l_i/l_nu> ~ rho^(e_i). Only l1 satisfies the exact decomposition
+    // ratio = Ghat (l1/l_nu)^2; l2 and l3 are genuinely separate probes of the same question.
+    // Each length is defined from RATIOS OF SUMMED SQUARES within the bin, never as a
+    // mean of a reciprocal: <rho/|grad omega|> is dominated by cells of near-zero
+    // gradient and its arithmetic mean has a heavy tail (a first attempt gave spreads of
+    // +-3.6 and disagreed with the decomposition on the SAME length). The budget-
+    // consistent forms are well conditioned and are what makes
+    // ratio = Ghat (l1/l_nu)^2 hold:
+    //     l1 = Sqrt(sum rho^2 / sum |grad omega|^2)      first order, mixed
+    //     l2 = Sqrt(sum rho^2 / sum |grad rho|^2)        first order, MODULUS ONLY
+    //     l3 = (sum rho^2 / sum |Lap omega|^2)^(1/4)     SECOND order
+    // and l_nu is taken at the bin's mean vorticity. e_i is the exponent in
+    // l_i/l_nu ~ rho^(e_i).
+    let mut bin_r2 = [0.0_f64; NBIN];
+    let mut bin_gw2 = [0.0_f64; NBIN];
+    let mut bin_gr2 = [0.0_f64; NBIN];
+    let mut bin_lap2 = [0.0_f64; NBIN];
+    {
+        let mut lap2f = Array3::<f64>::zeros(pshape);
+        for i in 0..3 {
+            lap2f += &lapw(i).mapv(|x| x * x);
+        }
+        Zip::from(&wmag)
+            .and(&w2)
+            .and(&gw2)
+            .and(&grho2)
+            .and(&lap2f)
+            .for_each(|&w, &w2v, &gw, &gr, &lp| {
+                let frac = w / wmax_safe;
+                if frac <= BIN_FLOOR {
+                    return;
+                }
+                let u = (frac.ln() - ln_floor) / (-ln_floor);
+                let b = ((u * NBIN as f64) as usize).min(NBIN - 1);
+                bin_r2[b] += w2v;
+                bin_gw2[b] += gw;
+                bin_gr2[b] += gr;
+                bin_lap2[b] += lp;
+            });
+    }
+    let scale_exponent = |den: &[f64; NBIN], quartic: bool| -> f64 {
+        let r: [f64; NBIN] = std::array::from_fn(|b| {
+            if den[b] > 0.0 && bin_r2[b] > 0.0 && bin_rho[b] > 0.0 && nu > 0.0 {
+                let q = bin_r2[b] / den[b];
+                let l = if quartic { q.powf(0.25) } else { q.sqrt() };
+                l / (nu / bin_rho[b]).sqrt()
+            } else {
+                f64::NAN
+            }
+        });
+        fit(&r).0
+    };
+
     let bin_ghat: [f64; NBIN] = std::array::from_fn(|b| {
         if bin_rho3[b] > 0.0 {
             bin_prod[b] / bin_rho3[b]
@@ -1176,6 +1250,9 @@ pub fn frame_diagnostics_uhat(
         cond_r2_full,
         cond_ghat_slope,
         cond_lratio_slope,
+        e_grad_omega: scale_exponent(&bin_gw2, false),
+        e_grad_rho: scale_exponent(&bin_gr2, false),
+        e_laplacian: scale_exponent(&bin_lap2, true),
     }
 }
 

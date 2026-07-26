@@ -136,6 +136,16 @@ pub struct FrameDiagnostics {
     /// regularity in this frame would want e <= 0.
     pub cond_ghat_slope: f64,
     pub cond_lratio_slope: f64,
+    /// THE DEFINITIONAL TEST. The exponent e in `<l/l_nu> ~ rho^e` for three independent
+    /// structure scales: `l1 = rho/|grad omega|` (first order, mixes modulus and
+    /// director), `l2 = rho/|grad rho|` (first order, MODULUS ONLY), and
+    /// `l3 = Sqrt(rho/|Lap omega|)` (SECOND order). Only `l1` satisfies the exact
+    /// decomposition `ratio = Ghat (l1/l_nu)^2`; the other two are separate probes. If e
+    /// agrees across all three the departure from viscous equilibrium is physical; if it
+    /// moves with the definition, the framing was ours rather than the flow's.
+    pub e_grad_omega: f64,
+    pub e_grad_rho: f64,
+    pub e_laplacian: f64,
     /// Log-log slope of the conditional ratio against the conditional mean `|omega|`,
     /// over the bins that carry samples and a positive ratio. THIS IS THE VERDICT:
     /// slope <= 0 means the ratio is bounded or decaying as the vorticity grows, so the
@@ -152,7 +162,7 @@ xi_energy,nem_energy,xi_energy_hi,nem_energy_hi,coherence_w,hi_fraction,\
 nu,production,transverse_dissipation,full_dissipation,payoff_ratio,\
 production_hi,transverse_dissipation_hi,payoff_ratio_hi,transverse_fraction,\
 cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope,\
-cond_slope_stderr,cond_r2,cond_nbins,cond_slope_full,cond_r2_full,cond_ghat_slope,cond_lratio_slope,\
+cond_slope_stderr,cond_r2,cond_nbins,cond_slope_full,cond_r2_full,cond_ghat_slope,cond_lratio_slope,e_grad_omega,e_grad_rho,e_laplacian,\
 xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,fd_recovery"
     }
 
@@ -162,7 +172,7 @@ xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,f
             "{},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
 {:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
 {:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
-{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
+{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
             self.step,
             self.time,
             self.enstrophy,
@@ -199,6 +209,9 @@ xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,f
             self.cond_r2_full,
             self.cond_ghat_slope,
             self.cond_lratio_slope,
+            self.e_grad_omega,
+            self.e_grad_rho,
+            self.e_laplacian,
             self.xi_energy_fd,
             self.full_dissipation_grad,
             self.parseval_residual,
