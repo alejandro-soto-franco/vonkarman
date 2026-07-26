@@ -127,7 +127,7 @@ pub fn run_resident(config: &ExperimentConfig) -> Result<(), Box<dyn std::error:
     if frame_enabled {
         solver.download_u_hat_all(&mut host);
         let arr = to_arr(&host);
-        let fd = frame_diagnostics_uhat(&arr, &ops, &grid, time, step);
+        let fd = frame_diagnostics_uhat(&arr, &ops, &grid, nu, time, step);
         info!(
             step = 0,
             enstrophy = fd.enstrophy,
@@ -148,7 +148,7 @@ pub fn run_resident(config: &ExperimentConfig) -> Result<(), Box<dyn std::error:
         if step.is_multiple_of(diag_interval) && frame_enabled {
             solver.download_u_hat_all(&mut host);
             let arr = to_arr(&host);
-            let fd = frame_diagnostics_uhat(&arr, &ops, &grid, time, step);
+            let fd = frame_diagnostics_uhat(&arr, &ops, &grid, nu, time, step);
             if let Some(fw) = frame_writer.as_mut() {
                 fw.write_row(&fd)?;
             }

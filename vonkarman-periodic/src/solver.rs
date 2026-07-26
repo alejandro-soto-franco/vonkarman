@@ -636,7 +636,14 @@ impl Domain<f64> for Periodic3D {
 impl Periodic3D {
     /// Frame / coherence / pressure diagnostics (see `frame_diagnostics_uhat`).
     pub fn frame_diagnostics(&self) -> FrameDiagnostics {
-        frame_diagnostics_uhat(&self.u_hat, &self.ops, &self.grid, self.time, self.step_count)
+        frame_diagnostics_uhat(
+            &self.u_hat,
+            &self.ops,
+            &self.grid,
+            self.params.nu,
+            self.time,
+            self.step_count,
+        )
     }
 }
 
@@ -651,6 +658,7 @@ pub fn frame_diagnostics_uhat(
     u_hat: &[Array3<Complex<f64>>; 3],
     ops: &SpectralOps<f64>,
     grid: &GridSpec,
+    nu: f64,
     time: f64,
     step: u64,
 ) -> FrameDiagnostics {
@@ -730,12 +738,15 @@ pub fn frame_diagnostics_uhat(
         omega[c] / &denom
     });
 
-    // strain magnitude and the CLMS null form f = |S|^2 - 1/2 |omega|^2
+    // strain magnitude, the CLMS null form f = |S|^2 - 1/2 |omega|^2, and the enstrophy
+    // production density omega . S omega = rho^2 (xi . S xi), the left side of (PAYOFF).
     let mut s2 = Array3::<f64>::zeros(pshape);
+    let mut prod = Array3::<f64>::zeros(pshape);
     for i in 0..3 {
         for j in 0..3 {
             let s = (gradu(i, j) + gradu(j, i)).mapv(|x| 0.5 * x);
             s2 += &s.mapv(|x| x * x);
+            prod += &(&s * omega[i] * omega[j]);
         }
     }
     let f = &s2 - &w2.mapv(|x| 0.5 * x);
@@ -823,6 +834,134 @@ pub fn frame_diagnostics_uhat(
 
     let f_rms = rms(&f);
     let alpha_p_rms = rms(&alpha_p);
+
+    // (PAYOFF) instrumentation. The inequality under test is
+    //     int rho^2 (xi . S xi)  <=  nu int rho^2 |grad xi|^2  +  subcritical,
+    // whose two sides are exactly the production <omega . S omega> and nu times the
+    // transverse dissipation <|omega|^2 |grad xi|^2>. The ratio of the two is the
+    // measurement the specification calls for: the depletion saturates at rate 1/rho
+    // precisely when this ratio stays bounded as the flow stresses.
+    //
+    // |grad xi|^2 comes from the finite-difference `gxi2`, not a spectral derivative,
+    // because xi is not band-limited (see `grad_sq_periodic`). The full dissipation
+    // <|grad omega|^2> is taken by Parseval in spectral space instead, where omega IS
+    // band-limited, so it is exact and costs no transform.
+    let transverse = &w2 * &gxi2;
+    let full_dissipation = {
+        // Parseval as a RATIO, which is independent of the backend's FFT normalisation:
+        //     <|grad omega|^2> / <|omega|^2>  =  sum k^2 |omega_hat|^2 / sum |omega_hat|^2
+        // exactly. Multiplying by the physical-space enstrophy then fixes the scale
+        // without assuming any transform convention. The r2c layout halves the LAST
+        // axis (spectral_shape = (nx, ny, nz/2 + 1)), so iz = 0 and, for even nz, the
+        // Nyquist iz = nz/2 are self-conjugate and count once; all other iz count twice.
+        let nyq = grid.nz / 2;
+        let even_nz = grid.nz.is_multiple_of(2);
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for ix in 0..snx {
+            for iy in 0..sny {
+                for iz in 0..snz {
+                    let weight = if iz == 0 || (even_nz && iz == nyq) {
+                        1.0
+                    } else {
+                        2.0
+                    };
+                    let k2 = ops.k_mag_sq[[ix, iy, iz]];
+                    for c in 0..3 {
+                        let w = omega_hat[c][[ix, iy, iz]];
+                        let p = weight * (w.re * w.re + w.im * w.im);
+                        num += k2 * p;
+                        den += p;
+                    }
+                }
+            }
+        }
+        if den > 0.0 {
+            mean(&w2) * num / den
+        } else {
+            0.0
+        }
+    };
+    // The transverse part uses a finite-difference |grad xi|^2, so the fraction it
+    // carries must be measured against a finite-difference |grad omega|^2 as well.
+    // Comparing an FD numerator to the spectral denominator would understate the
+    // fraction, because second-order differences damp exactly the high-k content that
+    // dominates the dissipation. omega is band-limited so FD on it is merely less
+    // accurate, not aliased, and the like-for-like ratio is the meaningful one.
+    let full_dissipation_fd = {
+        let mut acc = Array3::<f64>::zeros(pshape);
+        for c in 0..3 {
+            acc += &grad_sq_periodic(omega[c], dx);
+        }
+        mean(&acc)
+    };
+    // THE CONDITIONAL TEST, binned on |omega|/max|omega|. The specification requires
+    // `alpha <~ nu Phi` with `alpha = xi . S xi = (omega . S omega)/|omega|^2`, and that
+    // is a claim about HIGH vorticity, where a singularity would form. The
+    // volume-integrated ratio is dominated by the bulk and cannot see it. Counts cancel
+    // in each conditional ratio, so it is a clean per-bin average:
+    //     <alpha | rho> / (nu <Phi | rho>)  =  sum(alpha) / (nu sum(Phi))  over the bin.
+    const NBIN: usize = 4;
+    let mut bin_alpha = [0.0_f64; NBIN];
+    let mut bin_phi = [0.0_f64; NBIN];
+    let mut bin_rho = [0.0_f64; NBIN];
+    let mut bin_n = [0.0_f64; NBIN];
+    let wmax_safe = wmax.max(1e-30);
+    Zip::from(&wmag)
+        .and(&w2)
+        .and(&prod)
+        .and(&gxi2)
+        .for_each(|&w, &w2v, &p, &ph| {
+            let frac = w / wmax_safe;
+            let b = ((frac * NBIN as f64) as usize).min(NBIN - 1);
+            // alpha = (omega . S omega)/|omega|^2, undefined where the vorticity vanishes.
+            if w2v > 0.0 {
+                bin_alpha[b] += p / w2v;
+                bin_phi[b] += ph;
+                bin_rho[b] += w;
+                bin_n[b] += 1.0;
+            }
+        });
+    let cond_ratio: [f64; NBIN] = std::array::from_fn(|b| {
+        if bin_phi[b] > 0.0 {
+            bin_alpha[b] / (nu * bin_phi[b])
+        } else {
+            f64::NAN
+        }
+    });
+    let cond_rho: [f64; NBIN] =
+        std::array::from_fn(|b| if bin_n[b] > 0.0 { bin_rho[b] / bin_n[b] } else { 0.0 });
+    // Log-log slope of the conditional ratio against the conditional mean |omega|.
+    // Slope <= 0: the ratio is bounded or decaying as the amplitude grows, so the
+    // depletion saturates. Slope > 0: it grows with the amplitude and the route fails.
+    let cond_slope = {
+        let pts: Vec<(f64, f64)> = (0..NBIN)
+            .filter(|&b| bin_n[b] > 0.0 && cond_rho[b] > 0.0 && cond_ratio[b] > 0.0)
+            .map(|b| (cond_rho[b].ln(), cond_ratio[b].ln()))
+            .collect();
+        if pts.len() < 2 {
+            f64::NAN
+        } else {
+            let m = pts.len() as f64;
+            let sx: f64 = pts.iter().map(|p| p.0).sum();
+            let sy: f64 = pts.iter().map(|p| p.1).sum();
+            let sxx: f64 = pts.iter().map(|p| p.0 * p.0).sum();
+            let sxy: f64 = pts.iter().map(|p| p.0 * p.1).sum();
+            let den = m * sxx - sx * sx;
+            if den.abs() < 1e-30 {
+                f64::NAN
+            } else {
+                (m * sxy - sx * sy) / den
+            }
+        }
+    };
+
+    let production = mean(&prod);
+    let transverse_dissipation = mean(&transverse);
+    let production_hi = masked_mean(&prod);
+    let transverse_dissipation_hi = masked_mean(&transverse);
+    let ratio = |p: f64, d: f64| p / (nu * d + 1e-300);
+
     FrameDiagnostics {
         time,
         step,
@@ -838,6 +977,21 @@ pub fn frame_diagnostics_uhat(
         nem_energy_hi: masked_mean(&gnem2),
         coherence_w: mean(&(&wmag.mapv(f64::sqrt) * &gnem2)),
         hi_fraction: mask.sum() / n3,
+        nu,
+        production,
+        transverse_dissipation,
+        full_dissipation,
+        payoff_ratio: ratio(production, transverse_dissipation),
+        production_hi,
+        transverse_dissipation_hi,
+        payoff_ratio_hi: ratio(production_hi, transverse_dissipation_hi),
+        transverse_fraction: transverse_dissipation / (full_dissipation_fd + 1e-300),
+        cond_ratio_q1: cond_ratio[0],
+        cond_ratio_q2: cond_ratio[1],
+        cond_ratio_q3: cond_ratio[2],
+        cond_ratio_q4: cond_ratio[3],
+        cond_rho_q4: cond_rho[3],
+        cond_slope,
     }
 }
 
@@ -871,6 +1025,56 @@ fn grad_sq_periodic(field: &Array3<f64>, dx: f64) -> Array3<f64> {
 mod tests {
     use super::*;
     use vonkarman_core::domain::Domain;
+
+    /// The (PAYOFF) instrumentation must respect the decomposition
+    /// `|grad omega|^2 = |grad |omega||^2 + |omega|^2 |grad xi|^2`, so the full
+    /// dissipation dominates its own transverse part. This is the check that catches a
+    /// wrong Parseval normalisation or a Hermitian weight applied to the wrong axis:
+    /// either error moves `full_dissipation` by a large factor while the physical-space
+    /// `transverse_dissipation` is unaffected.
+    #[test]
+    fn payoff_instrumentation_is_consistent() {
+        let n = 32;
+        let nu = 0.01;
+        let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+        let solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let fd = solver.frame_diagnostics();
+
+        assert!(fd.enstrophy > 0.0, "enstrophy should be positive");
+        assert!(
+            fd.transverse_dissipation > 0.0,
+            "transverse dissipation should be positive"
+        );
+        assert!(
+            fd.full_dissipation >= fd.transverse_dissipation * (1.0 - 1e-9),
+            "full dissipation {} must dominate its transverse part {}",
+            fd.full_dissipation,
+            fd.transverse_dissipation
+        );
+        assert!(
+            fd.transverse_fraction > 0.0 && fd.transverse_fraction <= 1.0 + 1e-9,
+            "transverse fraction {} must lie in (0, 1]",
+            fd.transverse_fraction
+        );
+        assert!(fd.production.is_finite(), "production must be finite");
+        assert!(fd.payoff_ratio.is_finite(), "payoff ratio must be finite");
+        assert_eq!(fd.nu, nu, "nu must be carried through");
+
+        // The conditional bins must be populated and ordered in amplitude: the top bin
+        // is conditioned on the largest |omega|, so its mean vorticity must exceed the
+        // whole-field RMS. A binning error (wrong index, wrong normalisation) breaks
+        // this immediately.
+        assert!(
+            fd.cond_rho_q4 > fd.enstrophy.sqrt(),
+            "top-bin mean |omega| {} should exceed the RMS {}",
+            fd.cond_rho_q4,
+            fd.enstrophy.sqrt()
+        );
+        assert!(
+            fd.cond_rho_q4 <= fd.max_vorticity * (1.0 + 1e-9),
+            "top-bin mean |omega| cannot exceed max |omega|"
+        );
+    }
 
     #[test]
     fn taylor_green_energy_decays() {

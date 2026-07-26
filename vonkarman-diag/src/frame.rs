@@ -48,19 +48,71 @@ pub struct FrameDiagnostics {
     pub coherence_w: f64,
     /// Volume fraction of the high-|omega| region (context for the _hi columns).
     pub hi_fraction: f64,
+    /// Kinematic viscosity, carried so the CSV is self-contained (the payoff ratio
+    /// divides by it, and the ratio is meaningless without knowing which nu it used).
+    pub nu: f64,
+    /// Enstrophy production <omega . S omega> = <rho^2 alpha>, the left side of (PAYOFF).
+    pub production: f64,
+    /// Transverse dissipation density <|omega|^2 |grad xi|^2> = <rho^2 Phi>, the right
+    /// side of (PAYOFF) before multiplying by nu. Uses the dealiased finite-difference
+    /// |grad xi|^2, so it is the resolution-convergent measure.
+    pub transverse_dissipation: f64,
+    /// Full enstrophy dissipation <|grad omega|^2>, by Parseval in spectral space
+    /// (omega IS band-limited, so this is exact and costs no transform). Equals the
+    /// transverse part plus the longitudinal part <|grad |omega||^2>.
+    pub full_dissipation: f64,
+    /// THE MEASUREMENT: R = <omega . S omega> / (nu <|omega|^2 |grad xi|^2>).
+    /// (PAYOFF) requires R <= 1 up to the subcritical remainder, and the programme's
+    /// specification requires the depletion to saturate at rate 1/rho, which is exactly
+    /// the statement that R stays bounded as the flow stresses.
+    pub payoff_ratio: f64,
+    /// The same three over the high-|omega| region, where the Constantin-Fefferman
+    /// depletion is the relevant mechanism.
+    pub production_hi: f64,
+    pub transverse_dissipation_hi: f64,
+    pub payoff_ratio_hi: f64,
+    /// Fraction of the full dissipation carried by the transverse (director) part,
+    /// measured like-for-like against a finite-difference `<|grad omega|^2>` since the
+    /// numerator is finite-difference too. (PAYOFF) discards the longitudinal part, so
+    /// this says how much is given away: a small fraction means the transverse-only form
+    /// is a strong weakening of the enstrophy budget.
+    pub transverse_fraction: f64,
+    /// THE CONDITIONAL TEST. The specification requires `alpha <~ nu Phi` with
+    /// `alpha = xi . S xi`, and that is a statement about behaviour at HIGH vorticity,
+    /// where a singularity would form. The volume-integrated `payoff_ratio` cannot see
+    /// it, being dominated by the bulk. These are `<alpha | rho> / (nu <Phi | rho>)` in
+    /// four bins of `|omega| / max|omega|`: [0,1/4), [1/4,1/2), [1/2,3/4), [3/4,1].
+    /// Counts cancel in the ratio, so each is a clean conditional average.
+    pub cond_ratio_q1: f64,
+    pub cond_ratio_q2: f64,
+    pub cond_ratio_q3: f64,
+    pub cond_ratio_q4: f64,
+    /// Conditional mean `|omega|` in the top bin, for context on where q4 sits.
+    pub cond_rho_q4: f64,
+    /// Log-log slope of the conditional ratio against the conditional mean `|omega|`,
+    /// over the bins that carry samples and a positive ratio. THIS IS THE VERDICT:
+    /// slope <= 0 means the ratio is bounded or decaying as the vorticity grows, so the
+    /// depletion saturates and the mechanism holds where it matters; slope > 0 means it
+    /// grows with the amplitude and the route is refuted.
+    pub cond_slope: f64,
 }
 
 impl FrameDiagnostics {
     /// CSV header matching `csv_row`.
     pub fn csv_header() -> &'static str {
         "step,time,enstrophy,max_vorticity,f_rms,alpha_p_rms,rho_all,rho_hi,\
-xi_energy,nem_energy,xi_energy_hi,nem_energy_hi,coherence_w,hi_fraction"
+xi_energy,nem_energy,xi_energy_hi,nem_energy_hi,coherence_w,hi_fraction,\
+nu,production,transverse_dissipation,full_dissipation,payoff_ratio,\
+production_hi,transverse_dissipation_hi,payoff_ratio_hi,transverse_fraction,\
+cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope"
     }
 
     /// One CSV row (no trailing newline).
     pub fn csv_row(&self) -> String {
         format!(
-            "{},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
+            "{},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
+{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
+{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
             self.step,
             self.time,
             self.enstrophy,
@@ -75,6 +127,21 @@ xi_energy,nem_energy,xi_energy_hi,nem_energy_hi,coherence_w,hi_fraction"
             self.nem_energy_hi,
             self.coherence_w,
             self.hi_fraction,
+            self.nu,
+            self.production,
+            self.transverse_dissipation,
+            self.full_dissipation,
+            self.payoff_ratio,
+            self.production_hi,
+            self.transverse_dissipation_hi,
+            self.payoff_ratio_hi,
+            self.transverse_fraction,
+            self.cond_ratio_q1,
+            self.cond_ratio_q2,
+            self.cond_ratio_q3,
+            self.cond_ratio_q4,
+            self.cond_rho_q4,
+            self.cond_slope,
         )
     }
 }
