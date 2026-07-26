@@ -8,7 +8,6 @@ description = "Compute backends (CPU/GPU) for the vonkarman solver"
 [dependencies]
 vonkarman-core = { workspace = true }
 num-complex = { workspace = true }
-rayon = { workspace = true }
 
 # GPU backend deps, optional and pulled in only by the `cuda` feature. They are
 # pinned to the cuda-oxide fork branch `pr/fma-and-opt-pipeline`. `cuda-bindings`

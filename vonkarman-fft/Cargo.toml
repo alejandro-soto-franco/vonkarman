@@ -9,7 +9,6 @@ description = "FFT backends for the vonkarman solver"
 vonkarman-core = { workspace = true }
 ndarray = { workspace = true }
 num-complex = { workspace = true }
-rayon = { workspace = true }
 ndrustfft = "0.5"
 libloading = "0.8"
 thiserror = "2"

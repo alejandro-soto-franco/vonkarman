@@ -12,6 +12,5 @@ license = "MIT"
 description = "GPU kernel sources for vonkarman-compute, compiled to PTX by cuda-oxide"
 
 [dependencies]
-cuda-core = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline" }
 cuda-device = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline" }
 cuda-host = { git = "https://github.com/alejandro-soto-franco/cuda-oxide.git", branch = "pr/fma-and-opt-pipeline" }

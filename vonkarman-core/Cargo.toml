@@ -8,5 +8,4 @@ description = "Core types and traits for the vonkarman Navier-Stokes solver"
 [dependencies]
 ndarray = { workspace = true }
 num-complex = { workspace = true }
-rayon = { workspace = true }
 serde = { workspace = true }
