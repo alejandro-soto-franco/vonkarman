@@ -96,18 +96,37 @@ pub struct FrameDiagnostics {
     /// this says how much is given away: a small fraction means the transverse-only form
     /// is a strong weakening of the enstrophy budget.
     pub transverse_fraction: f64,
-    /// THE CONDITIONAL TEST. The specification requires `alpha <~ nu Phi` with
-    /// `alpha = xi . S xi`, and that is a statement about behaviour at HIGH vorticity,
-    /// where a singularity would form. The volume-integrated `payoff_ratio` cannot see
-    /// it, being dominated by the bulk. These are `<alpha | rho> / (nu <Phi | rho>)` in
-    /// four bins of `|omega| / max|omega|`: [0,1/4), [1/4,1/2), [1/2,3/4), [3/4,1].
-    /// Counts cancel in the ratio, so each is a clean conditional average.
+    /// THE CONDITIONAL TEST. The specification requires `alpha <~ nu Phi`, a claim about
+    /// HIGH vorticity where a singularity would form, which the volume-integrated
+    /// `payoff_ratio` cannot see because it is dominated by the bulk.
+    ///
+    /// Binned on the BUDGET DENSITIES `rho^2 alpha = omega . S omega` and
+    /// `rho^2 Phi = |grad omega|^2 - |grad rho|^2`, over 12 logarithmic bins of
+    /// `|omega| / max|omega|` above a floor of 1e-3, and grouped in fours for these
+    /// columns. Binning the densities rather than `alpha` and `Phi` separately means no
+    /// division by `rho^2`, so the low-vorticity void where the director spins
+    /// arbitrarily fast stops contaminating the measurement, and each value is literally
+    /// that vorticity band's contribution to (PAYOFF).
     pub cond_ratio_q1: f64,
     pub cond_ratio_q2: f64,
     pub cond_ratio_q3: f64,
     pub cond_ratio_q4: f64,
     /// Conditional mean `|omega|` in the top bin, for context on where q4 sits.
     pub cond_rho_q4: f64,
+    /// Count-weighted log-log fit of the per-bin (PAYOFF) ratio against the bin's mean
+    /// `|omega|`, over 12 logarithmic vorticity bins, with its standard error, R^2 and
+    /// the number of bins that carried enough samples to be used. The error and R^2 are
+    /// there so a noisy fit is recognised as noisy instead of being read as a trend.
+    pub cond_slope_stderr: f64,
+    pub cond_r2: f64,
+    pub cond_nbins: f64,
+    /// The SAME fit run against the FULL dissipation `<|grad omega|^2>` instead of the
+    /// transverse part, i.e. against the actual enstrophy budget rather than the
+    /// (PAYOFF) weakening of it. If the transverse slope is positive while this one is
+    /// not, the longitudinal dissipation `<|grad rho|^2>` is what protects the intense
+    /// regions and (PAYOFF) fails precisely because it discards the term doing the work.
+    pub cond_slope_full: f64,
+    pub cond_r2_full: f64,
     /// Log-log slope of the conditional ratio against the conditional mean `|omega|`,
     /// over the bins that carry samples and a positive ratio. THIS IS THE VERDICT:
     /// slope <= 0 means the ratio is bounded or decaying as the vorticity grows, so the
@@ -124,6 +143,7 @@ xi_energy,nem_energy,xi_energy_hi,nem_energy_hi,coherence_w,hi_fraction,\
 nu,production,transverse_dissipation,full_dissipation,payoff_ratio,\
 production_hi,transverse_dissipation_hi,payoff_ratio_hi,transverse_fraction,\
 cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope,\
+cond_slope_stderr,cond_r2,cond_nbins,cond_slope_full,cond_r2_full,\
 xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,fd_recovery"
     }
 
@@ -133,7 +153,7 @@ xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,f
             "{},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
 {:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
 {:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
-{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
+{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
             self.step,
             self.time,
             self.enstrophy,
@@ -163,6 +183,11 @@ xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,f
             self.cond_ratio_q4,
             self.cond_rho_q4,
             self.cond_slope,
+            self.cond_slope_stderr,
+            self.cond_r2,
+            self.cond_nbins,
+            self.cond_slope_full,
+            self.cond_r2_full,
             self.xi_energy_fd,
             self.full_dissipation_grad,
             self.parseval_residual,

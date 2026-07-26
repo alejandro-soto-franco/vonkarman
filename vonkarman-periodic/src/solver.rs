@@ -944,67 +944,163 @@ pub fn frame_diagnostics_uhat(
     // volume-integrated ratio is dominated by the bulk and cannot see it. Counts cancel
     // in each conditional ratio, so it is a clean per-bin average:
     //     <alpha | rho> / (nu <Phi | rho>)  =  sum(alpha) / (nu sum(Phi))  over the bin.
-    const NBIN: usize = 4;
-    let mut bin_alpha = [0.0_f64; NBIN];
-    let mut bin_phi = [0.0_f64; NBIN];
-    let mut bin_rho = [0.0_f64; NBIN];
-    let mut bin_n = [0.0_f64; NBIN];
+    // Bins the BUDGET DENSITIES themselves, rho^2 alpha = omega . S omega and
+    // rho^2 Phi = |grad omega|^2 - |grad rho|^2, rather than alpha and Phi separately.
+    // Two reasons. First, (PAYOFF) is an inequality between those two integrals, so a
+    // bin's ratio is literally that bin's contribution to it, and the whole-domain
+    // payoff_ratio is the count-weighted combination of them. Second, and decisively,
+    // neither density needs a division by rho^2, so the low-vorticity void where the
+    // director spins arbitrarily fast (Phi unbounded as rho -> 0) stops contaminating
+    // the fit. Logarithmic bins, since |omega| spans orders of magnitude.
+    const NBIN: usize = 12;
+    const BIN_FLOOR: f64 = 1e-3; // in units of max|omega|
     let wmax_safe = wmax.max(1e-30);
+    let ln_floor = BIN_FLOOR.ln();
+    let mut bin_prod = [0.0_f64; NBIN];
+    let mut bin_trans = [0.0_f64; NBIN];
+    let mut bin_full = [0.0_f64; NBIN];
+    let mut bin_rho_sum = [0.0_f64; NBIN];
+    let mut bin_n = [0.0_f64; NBIN];
     Zip::from(&wmag)
-        .and(&w2)
         .and(&prod)
-        .and(&gxi2_spec)
-        .for_each(|&w, &w2v, &p, &ph| {
+        .and(&transverse_spec)
+        .and(&gw2)
+        .for_each(|&w, &p, &tr, &fu| {
             let frac = w / wmax_safe;
-            let b = ((frac * NBIN as f64) as usize).min(NBIN - 1);
-            // alpha = (omega . S omega)/|omega|^2, undefined where the vorticity vanishes.
-            if w2v > 0.0 {
-                bin_alpha[b] += p / w2v;
-                bin_phi[b] += ph;
-                bin_rho[b] += w;
-                bin_n[b] += 1.0;
+            if frac <= BIN_FLOOR {
+                return;
             }
+            let u = (frac.ln() - ln_floor) / (-ln_floor); // 0 at the floor, 1 at max
+            let b = ((u * NBIN as f64) as usize).min(NBIN - 1);
+            bin_prod[b] += p;
+            bin_trans[b] += tr;
+            bin_full[b] += fu;
+            bin_rho_sum[b] += w;
+            bin_n[b] += 1.0;
         });
-    let cond_ratio: [f64; NBIN] = std::array::from_fn(|b| {
-        if bin_phi[b] > 0.0 {
-            bin_alpha[b] / (nu * bin_phi[b])
+    let bin_ratio: [f64; NBIN] = std::array::from_fn(|b| {
+        if bin_trans[b] > 0.0 {
+            bin_prod[b] / (nu * bin_trans[b])
         } else {
             f64::NAN
         }
     });
-    let cond_rho: [f64; NBIN] =
-        std::array::from_fn(|b| if bin_n[b] > 0.0 { bin_rho[b] / bin_n[b] } else { 0.0 });
-    // Log-log slope of the conditional ratio against the conditional mean |omega|.
-    // Slope <= 0: the ratio is bounded or decaying as the amplitude grows, so the
-    // depletion saturates. Slope > 0: it grows with the amplitude and the route fails.
-    // The lowest bin is EXCLUDED from the fit. Phi = (|grad omega|^2 - |grad rho|^2)/rho^2
-    // is genuinely unbounded as rho -> 0, because the director spins arbitrarily fast
-    // where the vorticity nearly vanishes, and that is a kinematic singularity of xi
-    // rather than anything about the depletion. Including it makes the fit measure the
-    // low-vorticity void instead of the intense region the criterion is about. (The
-    // finite-difference form hid this by smoothing the void away, which is why its slope
-    // looked shallower.) The fit therefore runs over the upper bins only.
-    let cond_slope = {
-        let pts: Vec<(f64, f64)> = (1..NBIN)
-            .filter(|&b| bin_n[b] > 0.0 && cond_rho[b] > 0.0 && cond_ratio[b] > 0.0)
-            .map(|b| (cond_rho[b].ln(), cond_ratio[b].ln()))
-            .collect();
-        if pts.len() < 2 {
-            f64::NAN
+    let bin_rho: [f64; NBIN] = std::array::from_fn(|b| {
+        if bin_n[b] > 0.0 {
+            bin_rho_sum[b] / bin_n[b]
         } else {
-            let m = pts.len() as f64;
-            let sx: f64 = pts.iter().map(|p| p.0).sum();
-            let sy: f64 = pts.iter().map(|p| p.1).sum();
-            let sxx: f64 = pts.iter().map(|p| p.0 * p.0).sum();
-            let sxy: f64 = pts.iter().map(|p| p.0 * p.1).sum();
-            let den = m * sxx - sx * sx;
-            if den.abs() < 1e-30 {
-                f64::NAN
+            0.0
+        }
+    });
+
+    // Count-weighted log-log fit of the per-bin ratio against the bin's mean |omega|,
+    // with a standard error and an R^2 so a noisy fit can be recognised as noisy rather
+    // than read as a trend. Bins carrying fewer than MIN_FRAC of the grid are dropped:
+    // the top bins are thin and would otherwise dominate a slope while carrying almost
+    // no budget. THE VERDICT: slope <= 0 means the (PAYOFF) violation does not worsen
+    // with vorticity, so the depletion saturates where it matters; slope > 0 means it
+    // worsens exactly where a singularity would form, refuting the route.
+    const MIN_FRAC: f64 = 1e-4;
+    let min_count = MIN_FRAC * n3;
+    // Shared count-weighted log-log fit, run twice: once against the TRANSVERSE
+    // dissipation, which is the (PAYOFF) statement, and once against the FULL
+    // dissipation, which is the actual enstrophy budget. If the transverse slope is
+    // positive while the full slope is not, then the longitudinal dissipation
+    // <|grad rho|^2> is what protects the intense regions, and (PAYOFF) fails because it
+    // discards exactly the term that does the work.
+    let fit = |ratio: &[f64; NBIN]| -> (f64, f64, f64, f64) {
+        let pts: Vec<(f64, f64, f64)> = (0..NBIN)
+            .filter(|&b| bin_n[b] >= min_count && bin_rho[b] > 0.0 && ratio[b] > 0.0)
+            .map(|b| (bin_rho[b].ln(), ratio[b].ln(), bin_n[b]))
+            .collect();
+        let n = pts.len() as f64;
+        if pts.len() < 3 {
+            return (f64::NAN, f64::NAN, f64::NAN, n);
+        }
+        let sw: f64 = pts.iter().map(|p| p.2).sum();
+        let sx: f64 = pts.iter().map(|p| p.2 * p.0).sum();
+        let sy: f64 = pts.iter().map(|p| p.2 * p.1).sum();
+        let sxx: f64 = pts.iter().map(|p| p.2 * p.0 * p.0).sum();
+        let sxy: f64 = pts.iter().map(|p| p.2 * p.0 * p.1).sum();
+        let den = sw * sxx - sx * sx;
+        if den.abs() < 1e-30 {
+            return (f64::NAN, f64::NAN, f64::NAN, n);
+        }
+        let slope = (sw * sxy - sx * sy) / den;
+        let intercept = (sxx * sy - sx * sxy) / den;
+        let ybar = sy / sw;
+        let ss_res: f64 = pts
+            .iter()
+            .map(|p| p.2 * (p.1 - intercept - slope * p.0).powi(2))
+            .sum();
+        let ss_tot: f64 = pts.iter().map(|p| p.2 * (p.1 - ybar).powi(2)).sum();
+        let dof = (pts.len() - 2) as f64;
+        let se = (ss_res / dof * sw / den).sqrt();
+        let r2 = if ss_tot > 0.0 {
+            1.0 - ss_res / ss_tot
+        } else {
+            f64::NAN
+        };
+        (slope, se, r2, n)
+    };
+    let bin_ratio_full: [f64; NBIN] = std::array::from_fn(|b| {
+        if bin_full[b] > 0.0 {
+            bin_prod[b] / (nu * bin_full[b])
+        } else {
+            f64::NAN
+        }
+    });
+    let (cond_slope_full, _, cond_r2_full, _) = fit(&bin_ratio_full);
+    let pts: Vec<(f64, f64, f64)> = (0..NBIN)
+        .filter(|&b| bin_n[b] >= min_count && bin_rho[b] > 0.0 && bin_ratio[b] > 0.0)
+        .map(|b| (bin_rho[b].ln(), bin_ratio[b].ln(), bin_n[b]))
+        .collect();
+    let (cond_slope, cond_slope_stderr, cond_r2) = if pts.len() < 3 {
+        (f64::NAN, f64::NAN, f64::NAN)
+    } else {
+        let sw: f64 = pts.iter().map(|p| p.2).sum();
+        let sx: f64 = pts.iter().map(|p| p.2 * p.0).sum();
+        let sy: f64 = pts.iter().map(|p| p.2 * p.1).sum();
+        let sxx: f64 = pts.iter().map(|p| p.2 * p.0 * p.0).sum();
+        let sxy: f64 = pts.iter().map(|p| p.2 * p.0 * p.1).sum();
+        let den = sw * sxx - sx * sx;
+        if den.abs() < 1e-30 {
+            (f64::NAN, f64::NAN, f64::NAN)
+        } else {
+            let slope = (sw * sxy - sx * sy) / den;
+            let intercept = (sxx * sy - sx * sxy) / den;
+            let ybar = sy / sw;
+            let ss_res: f64 = pts
+                .iter()
+                .map(|p| p.2 * (p.1 - intercept - slope * p.0).powi(2))
+                .sum();
+            let ss_tot: f64 = pts.iter().map(|p| p.2 * (p.1 - ybar).powi(2)).sum();
+            let dof = (pts.len() - 2) as f64;
+            let se = if dof > 0.0 {
+                (ss_res / dof * sw / den).sqrt()
             } else {
-                (m * sxy - sx * sy) / den
-            }
+                f64::NAN
+            };
+            let r2 = if ss_tot > 0.0 {
+                1.0 - ss_res / ss_tot
+            } else {
+                f64::NAN
+            };
+            (slope, se, r2)
         }
     };
+    let cond_nbins = pts.len() as f64;
+    // Four coarse quartile summaries of the same per-bin ratios, for eyeballing.
+    let quart = |lo: usize, hi: usize| -> f64 {
+        let (mut p, mut t) = (0.0, 0.0);
+        for b in lo..hi {
+            p += bin_prod[b];
+            t += bin_trans[b];
+        }
+        if t > 0.0 { p / (nu * t) } else { f64::NAN }
+    };
+    let cond_ratio = [quart(0, 3), quart(3, 6), quart(6, 9), quart(9, NBIN)];
+    let cond_rho_top = *bin_rho.last().unwrap_or(&0.0);
 
     // <|grad omega|^2> from the physical-space gradients. This MUST agree with the
     // Parseval value above: they are the same quantity computed through independent
@@ -1053,8 +1149,13 @@ pub fn frame_diagnostics_uhat(
         cond_ratio_q2: cond_ratio[1],
         cond_ratio_q3: cond_ratio[2],
         cond_ratio_q4: cond_ratio[3],
-        cond_rho_q4: cond_rho[3],
+        cond_rho_q4: cond_rho_top,
         cond_slope,
+        cond_slope_stderr,
+        cond_r2,
+        cond_nbins,
+        cond_slope_full,
+        cond_r2_full,
     }
 }
 

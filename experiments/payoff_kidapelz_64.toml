@@ -1,0 +1,46 @@
+# (PAYOFF) ratio measurement, Taylor-Green, n=64, Re = 1/nu = 800.
+#
+# Measures R = <omega . S omega> / (nu <|omega|^2 |grad xi|^2>), the ratio whose
+# boundedness under stress is the numerical face of "the depletion saturates at rate
+# 1/rho" (clifford-ns FA/PowerSource). Re=800 rather than the classic 1600 because the
+# repo certifies 800 as cleanly resolved at 128^3 and 1600 as needing 256^3; this n=64
+# run is a pipeline validation, not the measurement, and the resolved run follows.
+#
+# |grad xi|^2 is taken by periodic finite differences, not spectrally: xi = omega/|omega|
+# is not band-limited and a spectral derivative aliases at any resolution.
+
+[run]
+name = "payoff-kidapelz-64"
+output_dir = "./output/payoff-kidapelz-64"
+
+[domain]
+type = "periodic3d"
+n = 64
+l = 6.283185307179586
+backend = "auto"
+
+[physics]
+nu = 1.25e-3
+
+[precision]
+tier = "f64"
+
+[integrator]
+method = "etd-rk4"
+cfl_safety = 0.5
+
+[initial_condition]
+type = "kida-pelz"
+
+[commit_cycle]
+diagnostics_interval = 5
+snapshot_interval = 100000
+checkpoint_interval = 100000
+
+[diagnostics]
+conservation_audit = true
+frame_diagnostics = true
+
+[termination]
+max_time = 12.0
+max_wall_hours = 1.0
