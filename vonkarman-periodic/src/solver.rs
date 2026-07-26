@@ -722,9 +722,17 @@ pub fn frame_diagnostics_uhat(
             batch1.push(deriv_hat(&u_hat[i], j));
         }
     }
+    // Vorticity gradients d_j omega_i, needed for the band-limited director-gradient
+    // energy below. omega is band-limited, so these spectral derivatives are exact.
+    for i in 0..3 {
+        for j in 0..3 {
+            batch1.push(deriv_hat(&omega_hat[i], j));
+        }
+    }
     let phys1 = par_c2r(batch1);
     let omega: [&Array3<f64>; 3] = [&phys1[0], &phys1[1], &phys1[2]];
     let gradu = |i: usize, j: usize| -> &Array3<f64> { &phys1[3 + i * 3 + j] };
+    let gradw = |i: usize, j: usize| -> &Array3<f64> { &phys1[12 + i * 3 + j] };
 
     let mut w2 = Array3::<f64>::zeros(pshape);
     for c in 0..3 {
@@ -823,6 +831,37 @@ pub fn frame_diagnostics_uhat(
         }
     }
 
+    // BAND-LIMITED director-gradient energy, replacing the finite-difference one for
+    // every (PAYOFF) quantity. Pointwise omega_i = rho xi_i gives
+    //     d_j omega_i = (d_j rho) xi_i + rho d_j xi_i,
+    // and sum_i xi_i d_j xi_i = (1/2) d_j |xi|^2 = 0 kills the cross term, so
+    //     |grad omega|^2 = |grad rho|^2 + rho^2 |grad xi|^2      EXACTLY,
+    // with d_j rho = (omega . d_j omega)/rho. Every ingredient is a spectral derivative
+    // of the BAND-LIMITED omega, so this neither aliases (as a spectral derivative of
+    // the non-band-limited xi would) nor damps (as the finite-difference derivative of
+    // xi does: it recovers only ~0.36 of the true dissipation at n=64 and ~0.59 at
+    // n=128 in a stressed Taylor-Green, see .wolf/buglog.json). Note rho^2 |grad xi|^2
+    // needs no division and stays finite where the vorticity vanishes.
+    let mut gw2 = Array3::<f64>::zeros(pshape);
+    for i in 0..3 {
+        for j in 0..3 {
+            gw2 += &gradw(i, j).mapv(|x| x * x);
+        }
+    }
+    let w2_safe = w2.mapv(|v| v.max(1e-300));
+    let mut grho2 = Array3::<f64>::zeros(pshape);
+    for j in 0..3 {
+        let mut num = Array3::<f64>::zeros(pshape);
+        for i in 0..3 {
+            num += &(omega[i] * gradw(i, j));
+        }
+        grho2 += &(num.mapv(|x| x * x) / &w2_safe);
+    }
+    // rho^2 |grad xi|^2 and |grad xi|^2, both band-limited. The clamp is round-off only:
+    // the identity makes the difference nonnegative exactly.
+    let transverse_spec = (&gw2 - &grho2).mapv(|v| v.max(0.0));
+    let gxi2_spec = &transverse_spec / &w2_safe;
+
     // reductions (means over the physical grid; _hi over the high-|omega| region)
     let mean = |arr: &Array3<f64>| arr.sum() / n3;
     let rms = |arr: &Array3<f64>| (arr.mapv(|x| x * x).sum() / n3).sqrt();
@@ -846,7 +885,11 @@ pub fn frame_diagnostics_uhat(
     // because xi is not band-limited (see `grad_sq_periodic`). The full dissipation
     // <|grad omega|^2> is taken by Parseval in spectral space instead, where omega IS
     // band-limited, so it is exact and costs no transform.
-    let transverse = &w2 * &gxi2;
+    // The band-limited transverse dissipation is the one (PAYOFF) is tested with. The
+    // finite-difference form is retained alongside it purely so the damping stays
+    // visible in the output rather than being silently corrected away.
+    let transverse = transverse_spec.clone();
+    let transverse_fd = &w2 * &gxi2;
     let full_dissipation = {
         // Parseval as a RATIO, which is independent of the backend's FFT normalisation:
         //     <|grad omega|^2> / <|omega|^2>  =  sum k^2 |omega_hat|^2 / sum |omega_hat|^2
@@ -910,7 +953,7 @@ pub fn frame_diagnostics_uhat(
     Zip::from(&wmag)
         .and(&w2)
         .and(&prod)
-        .and(&gxi2)
+        .and(&gxi2_spec)
         .for_each(|&w, &w2v, &p, &ph| {
             let frac = w / wmax_safe;
             let b = ((frac * NBIN as f64) as usize).min(NBIN - 1);
@@ -934,8 +977,15 @@ pub fn frame_diagnostics_uhat(
     // Log-log slope of the conditional ratio against the conditional mean |omega|.
     // Slope <= 0: the ratio is bounded or decaying as the amplitude grows, so the
     // depletion saturates. Slope > 0: it grows with the amplitude and the route fails.
+    // The lowest bin is EXCLUDED from the fit. Phi = (|grad omega|^2 - |grad rho|^2)/rho^2
+    // is genuinely unbounded as rho -> 0, because the director spins arbitrarily fast
+    // where the vorticity nearly vanishes, and that is a kinematic singularity of xi
+    // rather than anything about the depletion. Including it makes the fit measure the
+    // low-vorticity void instead of the intense region the criterion is about. (The
+    // finite-difference form hid this by smoothing the void away, which is why its slope
+    // looked shallower.) The fit therefore runs over the upper bins only.
     let cond_slope = {
-        let pts: Vec<(f64, f64)> = (0..NBIN)
+        let pts: Vec<(f64, f64)> = (1..NBIN)
             .filter(|&b| bin_n[b] > 0.0 && cond_rho[b] > 0.0 && cond_ratio[b] > 0.0)
             .map(|b| (cond_rho[b].ln(), cond_ratio[b].ln()))
             .collect();
@@ -956,8 +1006,15 @@ pub fn frame_diagnostics_uhat(
         }
     };
 
+    // <|grad omega|^2> from the physical-space gradients. This MUST agree with the
+    // Parseval value above: they are the same quantity computed through independent
+    // paths, so their agreement validates the spectral-derivative batch, the Hermitian
+    // weighting and the transform normalisation at once. It is the check that the
+    // finite-difference form silently failed.
+    let full_dissipation_grad = mean(&gw2);
     let production = mean(&prod);
     let transverse_dissipation = mean(&transverse);
+    let transverse_dissipation_fd = mean(&transverse_fd);
     let production_hi = masked_mean(&prod);
     let transverse_dissipation_hi = masked_mean(&transverse);
     let ratio = |p: f64, d: f64| p / (nu * d + 1e-300);
@@ -971,7 +1028,13 @@ pub fn frame_diagnostics_uhat(
         alpha_p_rms,
         rho_all: alpha_p_rms / (f_rms + 1e-30),
         rho_hi: masked_rms(&alpha_p) / (masked_rms(&f) + 1e-30),
-        xi_energy: mean(&gxi2),
+        xi_energy: mean(&gxi2_spec),
+        xi_energy_fd: mean(&gxi2),
+        full_dissipation_grad,
+        transverse_dissipation_fd,
+        fd_recovery: full_dissipation_fd / (full_dissipation + 1e-300),
+        parseval_residual: (full_dissipation_grad - full_dissipation).abs()
+            / (full_dissipation + 1e-300),
         nem_energy: mean(&gnem2),
         xi_energy_hi: masked_mean(&gxi2),
         nem_energy_hi: masked_mean(&gnem2),
@@ -985,7 +1048,7 @@ pub fn frame_diagnostics_uhat(
         production_hi,
         transverse_dissipation_hi,
         payoff_ratio_hi: ratio(production_hi, transverse_dissipation_hi),
-        transverse_fraction: transverse_dissipation / (full_dissipation_fd + 1e-300),
+        transverse_fraction: transverse_dissipation / (full_dissipation + 1e-300),
         cond_ratio_q1: cond_ratio[0],
         cond_ratio_q2: cond_ratio[1],
         cond_ratio_q3: cond_ratio[2],
@@ -1073,6 +1136,37 @@ mod tests {
         assert!(
             fd.cond_rho_q4 <= fd.max_vorticity * (1.0 + 1e-9),
             "top-bin mean |omega| cannot exceed max |omega|"
+        );
+
+        // THE CROSS-CHECK. <|grad omega|^2> is computed twice by independent paths:
+        // Parseval in spectral space, and the sum of squared physical-space spectral
+        // derivatives. They must agree. A wrong Hermitian weight, a wrong transform
+        // normalisation or a mis-indexed derivative batch breaks this immediately, and
+        // it is exactly the check the finite-difference estimator never had.
+        // Tight at t = 0, where the Taylor-Green field is smooth and the grid quadrature
+        // of the squared gradients is essentially exact. Along a stressed trajectory the
+        // residual grows to ~1e-2, because (d omega)^2 carries content to 2 k_max and the
+        // grid sum of it aliases; that is a quadrature effect on the cross-check only,
+        // not on the Parseval value, and it is two orders below the damping it replaced.
+        assert!(
+            fd.parseval_residual < 1e-10,
+            "Parseval and gradient paths to <|grad omega|^2> disagree by {} ({} vs {})",
+            fd.parseval_residual,
+            fd.full_dissipation,
+            fd.full_dissipation_grad
+        );
+        // The band-limited identity is exact, so the transverse part cannot exceed the
+        // whole, and the finite-difference form must sit below the band-limited one.
+        assert!(
+            fd.transverse_dissipation <= fd.full_dissipation * (1.0 + 1e-9),
+            "transverse {} cannot exceed full {}",
+            fd.transverse_dissipation,
+            fd.full_dissipation
+        );
+        assert!(
+            fd.fd_recovery > 0.0 && fd.fd_recovery <= 1.0 + 1e-9,
+            "finite-difference recovery {} must lie in (0, 1]",
+            fd.fd_recovery
         );
     }
 

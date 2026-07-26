@@ -39,7 +39,25 @@ pub struct FrameDiagnostics {
     /// rho over the high-|omega| region (|omega| > 0.3 max|omega|), the CF-relevant zone.
     pub rho_hi: f64,
     /// Coherence energies: vector <|grad xi|^2> and nematic <|grad Xi|^2>.
+    /// `xi_energy` is the BAND-LIMITED value, from the exact identity
+    /// `|grad omega|^2 = |grad rho|^2 + rho^2 |grad xi|^2` with spectral derivatives of
+    /// omega. `xi_energy_fd` is the old second-order finite-difference value, kept so
+    /// the damping stays visible: it recovers only ~0.36 of the true dissipation at
+    /// n=64 and ~0.59 at n=128 in a stressed flow.
     pub xi_energy: f64,
+    pub xi_energy_fd: f64,
+    /// `<|grad omega|^2>` from the physical-space spectral gradients, which must agree
+    /// with the Parseval `full_dissipation`. `parseval_residual` is their relative gap:
+    /// two independent paths to one quantity, so a nonzero residual means the
+    /// spectral-derivative batch, the Hermitian weighting or the normalisation is wrong.
+    pub full_dissipation_grad: f64,
+    pub parseval_residual: f64,
+    /// Transverse dissipation by the old finite-difference route, and the recovery
+    /// fraction `<|grad omega|^2>_fd / <|grad omega|^2>_spectral`, which measures the
+    /// finite-difference damping directly (omega is band-limited, so the spectral value
+    /// is exact). Retained as the honest record of how much the old estimator lost.
+    pub transverse_dissipation_fd: f64,
+    pub fd_recovery: f64,
     pub nem_energy: f64,
     /// The same over the high-|omega| region.
     pub xi_energy_hi: f64,
@@ -54,8 +72,9 @@ pub struct FrameDiagnostics {
     /// Enstrophy production <omega . S omega> = <rho^2 alpha>, the left side of (PAYOFF).
     pub production: f64,
     /// Transverse dissipation density <|omega|^2 |grad xi|^2> = <rho^2 Phi>, the right
-    /// side of (PAYOFF) before multiplying by nu. Uses the dealiased finite-difference
-    /// |grad xi|^2, so it is the resolution-convergent measure.
+    /// side of (PAYOFF) before multiplying by nu. Taken BAND-LIMITED, as
+    /// `<|grad omega|^2 - |grad rho|^2>` with spectral derivatives of omega, so it needs
+    /// no division and neither aliases nor damps.
     pub transverse_dissipation: f64,
     /// Full enstrophy dissipation <|grad omega|^2>, by Parseval in spectral space
     /// (omega IS band-limited, so this is exact and costs no transform). Equals the
@@ -104,7 +123,8 @@ impl FrameDiagnostics {
 xi_energy,nem_energy,xi_energy_hi,nem_energy_hi,coherence_w,hi_fraction,\
 nu,production,transverse_dissipation,full_dissipation,payoff_ratio,\
 production_hi,transverse_dissipation_hi,payoff_ratio_hi,transverse_fraction,\
-cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope"
+cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope,\
+xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,fd_recovery"
     }
 
     /// One CSV row (no trailing newline).
@@ -112,7 +132,8 @@ cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope"
         format!(
             "{},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
 {:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
-{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
+{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
+{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
             self.step,
             self.time,
             self.enstrophy,
@@ -142,6 +163,11 @@ cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope"
             self.cond_ratio_q4,
             self.cond_rho_q4,
             self.cond_slope,
+            self.xi_energy_fd,
+            self.full_dissipation_grad,
+            self.parseval_residual,
+            self.transverse_dissipation_fd,
+            self.fd_recovery,
         )
     }
 }
