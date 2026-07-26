@@ -959,6 +959,7 @@ pub fn frame_diagnostics_uhat(
     let mut bin_prod = [0.0_f64; NBIN];
     let mut bin_trans = [0.0_f64; NBIN];
     let mut bin_full = [0.0_f64; NBIN];
+    let mut bin_rho3 = [0.0_f64; NBIN];
     let mut bin_rho_sum = [0.0_f64; NBIN];
     let mut bin_n = [0.0_f64; NBIN];
     Zip::from(&wmag)
@@ -975,6 +976,7 @@ pub fn frame_diagnostics_uhat(
             bin_prod[b] += p;
             bin_trans[b] += tr;
             bin_full[b] += fu;
+            bin_rho3[b] += w * w * w;
             bin_rho_sum[b] += w;
             bin_n[b] += 1.0;
         });
@@ -1051,6 +1053,19 @@ pub fn frame_diagnostics_uhat(
         }
     });
     let (cond_slope_full, _, cond_r2_full, _) = fit(&bin_ratio_full);
+    // Ghat = alpha/rho, the purely geometric (amplitude degree 0) factor in the exact
+    // decomposition ratio = Ghat (l/l_nu)^2 of FA`ViscousLength. Taken budget-consistently
+    // as sum(rho^2 alpha)/sum(rho^3) over the bin. Its slope tests the assumption that
+    // Ghat is amplitude-flat; the length separation l/l_nu ~ rho^e then has
+    // e = (slope - Ghat slope)/2, which is the viscous-length statement itself.
+    let bin_ghat: [f64; NBIN] = std::array::from_fn(|b| {
+        if bin_rho3[b] > 0.0 {
+            bin_prod[b] / bin_rho3[b]
+        } else {
+            f64::NAN
+        }
+    });
+    let (cond_ghat_slope, _, _, _) = fit(&bin_ghat);
     let pts: Vec<(f64, f64, f64)> = (0..NBIN)
         .filter(|&b| bin_n[b] >= min_count && bin_rho[b] > 0.0 && bin_ratio[b] > 0.0)
         .map(|b| (bin_rho[b].ln(), bin_ratio[b].ln(), bin_n[b]))
@@ -1090,6 +1105,9 @@ pub fn frame_diagnostics_uhat(
         }
     };
     let cond_nbins = pts.len() as f64;
+    // The viscous-length statement itself: ratio = Ghat (l/l_nu)^2 gives
+    // l/l_nu ~ rho^e with e = (slope - Ghat slope)/2.
+    let cond_lratio_slope = (cond_slope - cond_ghat_slope) / 2.0;
     // Four coarse quartile summaries of the same per-bin ratios, for eyeballing.
     let quart = |lo: usize, hi: usize| -> f64 {
         let (mut p, mut t) = (0.0, 0.0);
@@ -1156,6 +1174,8 @@ pub fn frame_diagnostics_uhat(
         cond_nbins,
         cond_slope_full,
         cond_r2_full,
+        cond_ghat_slope,
+        cond_lratio_slope,
     }
 }
 
