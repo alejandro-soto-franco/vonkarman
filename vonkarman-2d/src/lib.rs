@@ -25,6 +25,8 @@ use num_complex::Complex;
 mod body;
 pub use body::Penalisation;
 
+pub mod export;
+
 type C = Complex<f64>;
 
 /// Spectral operators on an `nx x ny` periodic grid over `[0, lx) x [0, ly)`.
@@ -484,6 +486,23 @@ impl Sim {
     /// Physical gold and rust dye fields (real space), for rendering.
     pub fn dyes(&self) -> (Array2<f64>, Array2<f64>) {
         (self.spec.inverse(&self.gh), self.spec.inverse(&self.rh))
+    }
+
+    /// Total physical streamfunction: the vortical part from the Poisson solve
+    /// plus the mean-flow part `u_mean * y`.
+    ///
+    /// The mean part is non-periodic in `y` and is added analytically, which is
+    /// why a uniform stream draws as straight parallel streamlines.
+    pub fn streamfunction(&self) -> Array2<f64> {
+        let mut psi = self.spec.inverse(&self.spec.streamfunction_hat(&self.wh));
+        let (_dx, dy) = self.spec.spacing();
+        for j in 0..self.spec.ny() {
+            let y = j as f64 * dy;
+            for i in 0..self.spec.nx() {
+                psi[[i, j]] += self.u_mean * y;
+            }
+        }
+        psi
     }
 }
 
