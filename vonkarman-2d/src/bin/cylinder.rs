@@ -3,7 +3,7 @@
 //!
 //!   cylinder <config.toml>
 //!
-//! Config keys and their defaults are documented on [`Config`].
+//! Config keys are documented on [`Config`].
 
 use std::path::PathBuf;
 
@@ -41,12 +41,39 @@ struct Config {
     output_dir: PathBuf,
 }
 
+impl Config {
+    /// Checks the invariants nothing else in `main` reproves before using
+    /// them. `u_mean` and `re` are divided into below (`dt`, `nu`); zero or
+    /// negative either one turns those into an infinity or a NaN and the run
+    /// proceeds to write frames of garbage rather than failing. `stride` is
+    /// divided into by `usize::is_multiple_of` in the frame-write guard,
+    /// which never panics: unlike the plain `%` form it used to be, `stride
+    /// = 0` would silently write exactly one frame (at `step == spin_up`)
+    /// and then none again, rather than failing loudly. Grid size and box
+    /// length are already asserted by `Spectral2D::new`, so are not repeated
+    /// here.
+    fn validate(&self) {
+        assert!(
+            self.u_mean > 0.0,
+            "u_mean must be positive, got {}",
+            self.u_mean
+        );
+        assert!(self.re > 0.0, "re must be positive, got {}", self.re);
+        assert!(
+            self.stride > 0,
+            "stride must be positive, got {}",
+            self.stride
+        );
+    }
+}
+
 fn main() {
     let path = std::env::args()
         .nth(1)
         .expect("usage: cylinder <config.toml>");
     let text = std::fs::read_to_string(&path).expect("read config");
     let cfg: Config = toml::from_str(&text).expect("parse config");
+    cfg.validate();
 
     let d = 1.0_f64;
     let (lx, ly) = (cfg.lx_d * d, cfg.ly_d * d);
