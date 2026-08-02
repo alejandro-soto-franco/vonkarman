@@ -75,3 +75,52 @@ fn new_square_reproduces_the_legacy_box() {
     assert!((s.lx() - TAU).abs() < 1e-15);
     assert!((s.ly() - TAU).abs() < 1e-15);
 }
+
+use vonkarman_2d::Sim;
+
+/// A compact vorticity blob in a uniform stream translates at the stream speed.
+#[test]
+fn mean_flow_advects_a_blob_downstream() {
+    let (nx, ny, lx, ly) = (128, 64, 4.0 * TAU, 2.0 * TAU);
+    let s = Spectral2D::new(nx, ny, lx, ly);
+    let (dx, dy) = s.spacing();
+    let (cx, cy) = (0.25 * lx, 0.5 * ly);
+    let core = 0.5;
+    let mut omega = Array2::<f64>::zeros((nx, ny));
+    for i in 0..nx {
+        for j in 0..ny {
+            let (x, y) = (i as f64 * dx, j as f64 * dy);
+            let r2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            omega[[i, j]] = (-r2 / (core * core)).exp();
+        }
+    }
+    let wh = s.forward(&omega);
+    let zero = Array2::<num_complex::Complex<f64>>::zeros(wh.raw_dim());
+    let u_mean = 1.0;
+    let dt = 2.0e-3;
+    let steps = 500;
+    let mut sim = Sim::new(s, wh, zero.clone(), zero, dt, 1.0e-4, 1.0e-4);
+    sim.set_mean_flow(u_mean);
+    for _ in 0..steps {
+        sim.step();
+    }
+
+    // Vorticity-weighted centroid in x, on a box wide enough that the blob
+    // does not wrap within the integration time.
+    let w = sim.vorticity();
+    let (mut num, mut den) = (0.0_f64, 0.0_f64);
+    for i in 0..nx {
+        let x = i as f64 * dx;
+        for j in 0..ny {
+            let a = w[[i, j]].max(0.0);
+            num += a * x;
+            den += a;
+        }
+    }
+    let centroid = num / den;
+    let expected = cx + u_mean * dt * steps as f64;
+    assert!(
+        (centroid - expected).abs() < 2.0 * dx,
+        "centroid {centroid:.4}, expected {expected:.4}"
+    );
+}

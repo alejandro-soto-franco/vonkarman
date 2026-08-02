@@ -260,6 +260,10 @@ pub struct Sim {
     /// component) added to the advecting velocity. A divergence-free curtain
     /// `v = v(x)` in a vertical strip that cuts through the dye top-to-bottom.
     v_jet: Array2<f64>,
+    /// Uniform stream speed along `+x`, added to the advecting velocity and to
+    /// any reported total velocity. It carries no vorticity, so it is held
+    /// outside the state.
+    u_mean: f64,
 }
 
 impl Sim {
@@ -288,6 +292,7 @@ impl Sim {
             ec,
             ec2,
             v_jet,
+            u_mean: 0.0,
         }
     }
 
@@ -311,6 +316,28 @@ impl Sim {
         }
     }
 
+    /// Set the uniform stream speed along `+x`.
+    pub fn set_mean_flow(&mut self, u_mean: f64) {
+        self.u_mean = u_mean;
+    }
+
+    /// The uniform stream speed along `+x`.
+    pub fn mean_flow(&self) -> f64 {
+        self.u_mean
+    }
+
+    /// Physical vorticity.
+    pub fn vorticity(&self) -> Array2<f64> {
+        self.spec.inverse(&self.wh)
+    }
+
+    /// Physical total velocity: the vortical part plus the uniform stream.
+    pub fn total_velocity(&self) -> (Array2<f64>, Array2<f64>) {
+        let (mut u, v) = self.spec.velocity(&self.wh);
+        u += self.u_mean;
+        (u, v)
+    }
+
     /// One IF-RK4 step for vorticity + the two dyes, sharing one velocity per
     /// stage. Standard integrating-factor RK4 (reduces to RK4 with zero
     /// viscosity, exact with zero nonlinear term).
@@ -322,8 +349,10 @@ impl Sim {
         // the DYE advection only (not the vorticity), so the vortices keep their
         // true orbit-and-fray dynamics while the jet drags the colours downward
         // in its strip, cutting a vertical streak through the swirl.
+        let u_mean = self.u_mean;
         let rhs = |w: &Array2<C>, g: &Array2<C>, r: &Array2<C>| {
-            let (u, v) = s.velocity(w);
+            let (mut u, v) = s.velocity(w);
+            u += u_mean;
             let mut vd = v.clone();
             Zip::from(&mut vd).and(vjet).for_each(|vd, &vj| *vd += vj);
             (
