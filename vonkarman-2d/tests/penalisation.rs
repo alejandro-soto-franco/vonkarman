@@ -118,6 +118,45 @@ fn the_no_slip_substep_pulls_velocity_toward_rest_inside_the_body() {
     );
 }
 
+/// Cheap always-run check on [`Sim::body_force`]: unlike the Angot estimator
+/// it replaced, the momentum-removed force should not depend strongly on
+/// `eta_p`. A body in a uniform stream should feel drag along `+x`, and that
+/// drag should barely move when `eta_p` is halved (a correct estimator is
+/// exact for the scheme regardless of `eta_p`; the broken one this replaced
+/// scaled roughly as `1 / eta_p`, so halving `eta_p` would have roughly
+/// doubled it).
+#[test]
+fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
+    let drag_at = |eta_p: f64| -> f64 {
+        let (s, cx, cy, radius, d) = setup(96, 48);
+        let (dx, _dy) = s.spacing();
+        let u_mean = 1.0_f64;
+        let nu = u_mean * d / 100.0; // Re = 100
+        let dt = 0.25 * dx / u_mean;
+        let zero =
+            Array2::<Complex<f64>>::zeros(s.forward(&Array2::zeros((s.nx(), s.ny()))).raw_dim());
+        let body = Penalisation::cylinder(&s, cx, cy, radius, eta_p, 20.0, 3.0, 5.0);
+        let mut sim = Sim::new(s, zero.clone(), zero.clone(), zero, dt, nu, nu);
+        sim.set_mean_flow(u_mean);
+        sim.set_body(body);
+        for _ in 0..8 {
+            sim.step();
+        }
+        sim.body_force().0
+    };
+    let fx_full = drag_at(1e-3);
+    let fx_half = drag_at(5e-4);
+    assert!(fx_full > 0.0, "drag should be positive along +x: {fx_full}");
+    assert!(fx_half > 0.0, "drag should be positive along +x: {fx_half}");
+    let rel_diff = (fx_full - fx_half).abs() / fx_full.abs().max(fx_half.abs());
+    assert!(
+        rel_diff < 0.08,
+        "force estimate depends on eta_p: fx(1e-3) = {fx_full:.6}, fx(5e-4) = {fx_half:.6}, \
+         relative difference {:.2}%",
+        100.0 * rel_diff
+    );
+}
+
 #[test]
 #[ignore = "500 steps at 256 x 128 does not finish within the debug test budget; \
             run with cargo test -p vonkarman-2d --test penalisation --release -- --ignored"]

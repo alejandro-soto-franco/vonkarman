@@ -15,8 +15,18 @@
 //!
 //! The fringe is a strip at the downstream end where vorticity is relaxed to
 //! zero, so the wake does not re-enter the periodic box as inflow.
+//!
+//! The force the body exerts on the flow is not computed here. The Angot
+//! estimator `F = (1 / eta_p) * integral(chi * u)` is exact only for an
+//! *explicit* penalisation term, where the interior velocity scales linearly
+//! with `eta_p`. Under the exponential substep this crate uses, it does not:
+//! the estimator's `1 / eta_p` prefactor amplifies the velocity that survives
+//! across the smoothed mask edge, and that surviving band shrinks slower than
+//! `1 / eta_p` grows, so the estimate diverges as `eta_p -> 0` rather than
+//! converging. [`crate::Sim::body_force`] instead measures the momentum the
+//! substeps actually remove, which is exact for the scheme as implemented.
 
-use ndarray::{Array2, Zip};
+use ndarray::Array2;
 
 use crate::Spectral2D;
 
@@ -28,7 +38,8 @@ pub struct Penalisation {
     sigma: Array2<f64>,
     /// Penalisation time constant.
     eta_p: f64,
-    /// Cell area, for the force integral.
+    /// Cell area, for area-weighted integrals over the grid (currently the
+    /// momentum-removed force estimate in [`crate::Sim::body_force`]).
     cell_area: f64,
 }
 
@@ -92,18 +103,9 @@ impl Penalisation {
         self.sigma.mapv(|s| (-s * h).exp())
     }
 
-    /// Force per unit span exerted on the body by the flow, from the
-    /// penalisation integral `F = (1 / eta_p) * integral of chi * u`.
-    ///
-    /// Pass the **total** velocity, stream included.
-    pub fn force(&self, u: &Array2<f64>, v: &Array2<f64>) -> (f64, f64) {
-        let mut fx = 0.0;
-        let mut fy = 0.0;
-        Zip::from(&self.chi).and(u).and(v).for_each(|&c, &u, &v| {
-            fx += c * u;
-            fy += c * v;
-        });
-        let s = self.cell_area / self.eta_p;
-        (fx * s, fy * s)
+    /// Grid cell area `dx * dy`, for area-weighting a sum over the grid into
+    /// an integral.
+    pub(crate) fn cell_area(&self) -> f64 {
+        self.cell_area
     }
 }

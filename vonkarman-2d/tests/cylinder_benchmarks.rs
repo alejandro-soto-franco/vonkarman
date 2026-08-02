@@ -78,8 +78,8 @@ fn re40_drag_and_bubble_match_the_steady_benchmark() {
     for _ in 0..steps {
         r.sim.step();
     }
-    let (u, v) = r.sim.total_velocity();
-    let (fx, _fy) = r.sim.body().unwrap().force(&u, &v);
+    let (u, _v) = r.sim.total_velocity();
+    let (fx, _fy) = r.sim.body_force();
     let cd = fx / (0.5 * 1.0 * 1.0); // C_d = F_x / (0.5 rho U^2 d), rho = U = d = 1
     println!("Re 40: C_d = {cd:.3}");
     assert!((1.45..=1.75).contains(&cd), "C_d = {cd:.3}");
