@@ -34,7 +34,7 @@ fn main() {
     let (sep, core, circ) = (1.7, 0.5, 10.0);
     let (noise, seed) = (0.12, 12345);
 
-    let spec = Spectral2D::new(n);
+    let spec = Spectral2D::new_square(n);
     let (wh, gh, rh) = co_rotating_vortices(&spec, sep, core, circ, noise, seed);
     let mut sim = Sim::new(spec, wh, gh, rh, dt, nu, kappa);
     // Steady downward jet: a rectangular vertical strip through the centre that

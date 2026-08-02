@@ -24,39 +24,57 @@ use num_complex::Complex;
 
 type C = Complex<f64>;
 
-/// Spectral operators on an `n x n` periodic grid over `[0, 2*pi)^2`.
+/// Spectral operators on an `nx x ny` periodic grid over `[0, lx) x [0, ly)`.
+///
+/// Axis 0 is `x` and carries a full complex FFT; axis 1 is `y` and carries a
+/// real-to-complex FFT, so spectral arrays have shape `(nx, ny/2 + 1)` and
+/// physical arrays have shape `(nx, ny)`.
 pub struct Spectral2D {
-    n: usize,
-    nh: usize,              // n/2 + 1 (rFFT half-spectrum length)
+    nx: usize,
+    ny: usize,
+    nyh: usize, // ny/2 + 1 (rFFT half-spectrum length)
+    lx: f64,
+    ly: f64,
     hx: FftHandler<f64>,    // axis 0: full complex FFT (kx)
     hy: R2cFftHandler<f64>, // axis 1: real-to-complex FFT (ky)
     kx: Array2<f64>,
     ky: Array2<f64>,
+    k2: Array2<f64>,
     k2inv: Array2<f64>,   // 1/|k|^2, zero at the mean mode
     dealias: Array2<f64>, // 2/3-rule mask (1 keep, 0 drop)
 }
 
 impl Spectral2D {
-    pub fn new(n: usize) -> Self {
-        let nh = n / 2 + 1;
-        let mut kx = Array2::<f64>::zeros((n, nh));
-        let mut ky = Array2::<f64>::zeros((n, nh));
-        let mut k2inv = Array2::<f64>::zeros((n, nh));
-        let mut dealias = Array2::<f64>::zeros((n, nh));
-        let cut = (n as f64) / 3.0;
-        for i in 0..n {
-            let kxi = if i <= n / 2 {
+    /// Build operators for an `nx x ny` grid over a box of size `lx x ly`.
+    ///
+    /// Wavenumbers are physical: `kx = 2 pi m / lx` with `m` the signed mode
+    /// index, `ky = 2 pi j / ly`. The 2/3 dealias mask is applied in mode-index
+    /// space, so it is independent of the box size.
+    pub fn new(nx: usize, ny: usize, lx: f64, ly: f64) -> Self {
+        assert!(nx >= 4 && ny >= 4, "grid must be at least 4 x 4");
+        assert!(lx > 0.0 && ly > 0.0, "box lengths must be positive");
+        let nyh = ny / 2 + 1;
+        let mut kx = Array2::<f64>::zeros((nx, nyh));
+        let mut ky = Array2::<f64>::zeros((nx, nyh));
+        let mut k2 = Array2::<f64>::zeros((nx, nyh));
+        let mut k2inv = Array2::<f64>::zeros((nx, nyh));
+        let mut dealias = Array2::<f64>::zeros((nx, nyh));
+        let (cutx, cuty) = (nx as f64 / 3.0, ny as f64 / 3.0);
+        let (fx, fy) = (std::f64::consts::TAU / lx, std::f64::consts::TAU / ly);
+        for i in 0..nx {
+            let m = if i <= nx / 2 {
                 i as f64
             } else {
-                i as f64 - n as f64
+                i as f64 - nx as f64
             };
-            for j in 0..nh {
-                let kyj = j as f64;
+            for j in 0..nyh {
+                let (kxi, kyj) = (fx * m, fy * j as f64);
                 kx[[i, j]] = kxi;
                 ky[[i, j]] = kyj;
-                let k2 = kxi * kxi + kyj * kyj;
-                k2inv[[i, j]] = if k2 > 0.0 { 1.0 / k2 } else { 0.0 };
-                dealias[[i, j]] = if kxi.abs() <= cut && kyj <= cut {
+                let kk = kxi * kxi + kyj * kyj;
+                k2[[i, j]] = kk;
+                k2inv[[i, j]] = if kk > 0.0 { 1.0 / kk } else { 0.0 };
+                dealias[[i, j]] = if m.abs() <= cutx && (j as f64) <= cuty {
                     1.0
                 } else {
                     0.0
@@ -64,44 +82,91 @@ impl Spectral2D {
             }
         }
         Self {
-            n,
-            nh,
-            hx: FftHandler::new(n),
-            hy: R2cFftHandler::new(n),
+            nx,
+            ny,
+            nyh,
+            lx,
+            ly,
+            hx: FftHandler::new(nx),
+            hy: R2cFftHandler::new(ny),
             kx,
             ky,
+            k2,
             k2inv,
             dealias,
         }
     }
 
-    pub fn n(&self) -> usize {
-        self.n
+    /// The legacy square box `n x n` over `[0, 2 pi)^2`.
+    pub fn new_square(n: usize) -> Self {
+        Self::new(n, n, std::f64::consts::TAU, std::f64::consts::TAU)
+    }
+
+    /// Grid points along `x`.
+    pub fn nx(&self) -> usize {
+        self.nx
+    }
+
+    /// Grid points along `y`.
+    pub fn ny(&self) -> usize {
+        self.ny
+    }
+
+    /// Box length along `x`.
+    pub fn lx(&self) -> f64 {
+        self.lx
+    }
+
+    /// Box length along `y`.
+    pub fn ly(&self) -> f64 {
+        self.ly
+    }
+
+    /// Grid spacing `(dx, dy)`.
+    pub fn spacing(&self) -> (f64, f64) {
+        (self.lx / self.nx as f64, self.ly / self.ny as f64)
+    }
+
+    /// Squared wavenumber magnitude over the half-spectrum.
+    pub fn k2(&self) -> &Array2<f64> {
+        &self.k2
     }
 
     /// Real field -> spectral (rFFT along axis 1, complex FFT along axis 0).
     pub fn forward(&self, real: &Array2<f64>) -> Array2<C> {
-        let mut tmp = Array2::<C>::zeros((self.n, self.nh));
+        let mut tmp = Array2::<C>::zeros((self.nx, self.nyh));
         ndfft_r2c(real, &mut tmp, &self.hy, 1);
-        let mut out = Array2::<C>::zeros((self.n, self.nh));
+        let mut out = Array2::<C>::zeros((self.nx, self.nyh));
         ndfft(&tmp, &mut out, &self.hx, 0);
         out
     }
 
     /// Spectral -> real field (inverse of [`Self::forward`], normalised).
     pub fn inverse(&self, spec: &Array2<C>) -> Array2<f64> {
-        let mut tmp = Array2::<C>::zeros((self.n, self.nh));
+        let mut tmp = Array2::<C>::zeros((self.nx, self.nyh));
         ndifft(spec, &mut tmp, &self.hx, 0);
-        let mut out = Array2::<f64>::zeros((self.n, self.n));
+        let mut out = Array2::<f64>::zeros((self.nx, self.ny));
         ndifft_r2c(&tmp, &mut out, &self.hy, 1);
         out
     }
 
+    /// Spectral streamfunction from spectral vorticity: `psi_hat = omega_hat / |k|^2`.
+    ///
+    /// The mean mode is left at zero, so this is the fluctuating part only.
+    pub fn streamfunction_hat(&self, what: &Array2<C>) -> Array2<C> {
+        let mut ph = Array2::<C>::zeros((self.nx, self.nyh));
+        Zip::from(&mut ph)
+            .and(what)
+            .and(&self.k2inv)
+            .for_each(|p, &w, &k2i| *p = w * k2i);
+        ph
+    }
+
     /// Physical velocity `(u, v)` from spectral vorticity:
     /// `u = +d(psi)/dy`, `v = -d(psi)/dx`, `psi_hat = omega_hat / |k|^2`.
-    fn velocity(&self, what: &Array2<C>) -> (Array2<f64>, Array2<f64>) {
-        let mut uh = Array2::<C>::zeros((self.n, self.nh));
-        let mut vh = Array2::<C>::zeros((self.n, self.nh));
+    pub fn velocity(&self, what: &Array2<C>) -> (Array2<f64>, Array2<f64>) {
+        let mut uh = Array2::<C>::zeros((self.nx, self.nyh));
+        let mut vh = Array2::<C>::zeros((self.nx, self.nyh));
         let i = C::new(0.0, 1.0);
         Zip::from(&mut uh)
             .and(&mut vh)
@@ -117,12 +182,30 @@ impl Spectral2D {
         (self.inverse(&uh), self.inverse(&vh))
     }
 
+    /// Spectral vorticity from a physical velocity field:
+    /// `omega = d(v)/dx - d(u)/dy`.
+    ///
+    /// Taking the curl discards any divergent part, so this doubles as the
+    /// Helmholtz projection after a penalisation substep.
+    pub fn curl(&self, u: &Array2<f64>, v: &Array2<f64>) -> Array2<C> {
+        let (uh, vh) = (self.forward(u), self.forward(v));
+        let mut wh = Array2::<C>::zeros((self.nx, self.nyh));
+        let i = C::new(0.0, 1.0);
+        Zip::from(&mut wh)
+            .and(&uh)
+            .and(&vh)
+            .and(&self.kx)
+            .and(&self.ky)
+            .for_each(|w, &u, &v, &kx, &ky| *w = i * kx * v - i * ky * u);
+        wh
+    }
+
     /// Dealiased advective nonlinear term `-(u . grad s)` in spectral space for
     /// a scalar `s` (vorticity or dye) given the physical velocity.
     fn advect(&self, shat: &Array2<C>, u: &Array2<f64>, v: &Array2<f64>) -> Array2<C> {
         let i = C::new(0.0, 1.0);
-        let mut sxh = Array2::<C>::zeros((self.n, self.nh));
-        let mut syh = Array2::<C>::zeros((self.n, self.nh));
+        let mut sxh = Array2::<C>::zeros((self.nx, self.nyh));
+        let mut syh = Array2::<C>::zeros((self.nx, self.nyh));
         Zip::from(&mut sxh)
             .and(&mut syh)
             .and(shat)
@@ -134,7 +217,7 @@ impl Spectral2D {
             });
         let sx = self.inverse(&sxh);
         let sy = self.inverse(&syh);
-        let mut adv = Array2::<f64>::zeros((self.n, self.n));
+        let mut adv = Array2::<f64>::zeros((self.nx, self.ny));
         Zip::from(&mut adv)
             .and(u)
             .and(v)
@@ -151,19 +234,7 @@ impl Spectral2D {
 
 /// Real integrating-factor `exp(-coeff * |k|^2 * dt)` over the half-spectrum.
 fn integ_factor(s: &Spectral2D, coeff: f64, dt: f64) -> Array2<f64> {
-    let mut e = Array2::<f64>::zeros((s.n, s.nh));
-    for i in 0..s.n {
-        let kxi = if i <= s.n / 2 {
-            i as f64
-        } else {
-            i as f64 - s.n as f64
-        };
-        for j in 0..s.nh {
-            let k2 = kxi * kxi + (j as f64) * (j as f64);
-            e[[i, j]] = (-coeff * k2 * dt).exp();
-        }
-    }
-    e
+    s.k2().mapv(|k2| (-coeff * k2 * dt).exp())
 }
 
 #[inline]
@@ -185,7 +256,7 @@ pub struct Sim {
     ew2: Array2<f64>,
     ec: Array2<f64>,
     ec2: Array2<f64>,
-    /// Steady prescribed downward jet velocity (physical, `n x n`, the `v`
+    /// Steady prescribed downward jet velocity (physical, `nx x ny`, the `v`
     /// component) added to the advecting velocity. A divergence-free curtain
     /// `v = v(x)` in a vertical strip that cuts through the dye top-to-bottom.
     v_jet: Array2<f64>,
@@ -205,8 +276,7 @@ impl Sim {
         let ew2 = integ_factor(&spec, nu, dt * 0.5);
         let ec = integ_factor(&spec, kappa, dt);
         let ec2 = integ_factor(&spec, kappa, dt * 0.5);
-        let n = spec.n();
-        let v_jet = Array2::<f64>::zeros((n, n));
+        let v_jet = Array2::<f64>::zeros((spec.nx(), spec.ny()));
         Self {
             spec,
             wh,
@@ -227,15 +297,15 @@ impl Sim {
     /// downward where it passes, cutting a swath through the swirl. `v = v(x)`
     /// is divergence-free, so it needs no pressure correction.
     pub fn set_jet(&mut self, centre: f64, width: f64, speed: f64) {
-        let n = self.spec.n();
-        let dx = std::f64::consts::TAU / n as f64;
+        let (nx, ny) = (self.spec.nx(), self.spec.ny());
+        let (dx, _dy) = self.spec.spacing();
         let edge = 0.12; // smoothing width of the strip walls
         let (lo, hi) = (centre - 0.5 * width, centre + 0.5 * width);
-        for i in 0..n {
+        for i in 0..nx {
             let x = i as f64 * dx;
             // smooth top-hat in x: 1 inside the strip, 0 outside
             let th = 0.5 * (((x - lo) / edge).tanh() - ((x - hi) / edge).tanh());
-            for j in 0..n {
+            for j in 0..ny {
                 self.v_jet[[i, j]] = -speed * th; // downward (-y)
             }
         }
@@ -337,22 +407,22 @@ pub fn co_rotating_vortices(
     noise: f64,
     seed: u64,
 ) -> (Array2<C>, Array2<C>, Array2<C>) {
-    let n = spec.n();
-    let dx = std::f64::consts::TAU / n as f64;
-    let (cx, cy) = (std::f64::consts::PI, std::f64::consts::PI);
+    let (nx, ny) = (spec.nx(), spec.ny());
+    let (dx, dy) = spec.spacing();
+    let (cx, cy) = (0.5 * spec.lx(), 0.5 * spec.ly());
     let amp = circ / (std::f64::consts::PI * core * core);
-    let mut omega = Array2::<f64>::zeros((n, n));
-    let mut gold = Array2::<f64>::zeros((n, n));
-    let mut rust = Array2::<f64>::zeros((n, n));
+    let mut omega = Array2::<f64>::zeros((nx, ny));
+    let mut gold = Array2::<f64>::zeros((nx, ny));
+    let mut rust = Array2::<f64>::zeros((nx, ny));
     let centres = [
         (cx - 0.5 * sep, cy, 1.0_f64),
         (cx + 0.5 * sep, cy, 0.97_f64),
     ];
     let rd = 1.1 * core;
-    for i in 0..n {
+    for i in 0..nx {
         let x = i as f64 * dx;
-        for j in 0..n {
-            let y = j as f64 * dx;
+        for j in 0..ny {
+            let y = j as f64 * dy;
             let mut w = 0.0;
             for (vc, &(px, py, str)) in centres.iter().enumerate() {
                 let r2 = (x - px) * (x - px) + (y - py) * (y - py);
@@ -386,10 +456,10 @@ pub fn co_rotating_vortices(
             }
         }
         let scale = noise * amp / (modes.len() as f64).sqrt();
-        for i in 0..n {
+        for i in 0..nx {
             let x = i as f64 * dx;
-            for j in 0..n {
-                let y = j as f64 * dx;
+            for j in 0..ny {
+                let y = j as f64 * dy;
                 let mut sm = 0.0;
                 for &(kxm, kym, ph) in &modes {
                     sm += (kxm * x + kym * y + ph).cos();
@@ -411,13 +481,14 @@ pub fn co_rotating_vortices(
 /// from density), an "ink in water on white paper" look; overlaps tend toward
 /// orange and faint filaments read as light tints.
 pub fn write_dye_png(gold: &Array2<f64>, rust: &Array2<f64>, path: &str, white_bg: bool) {
-    let n = gold.shape()[0] as u32;
+    let nx = gold.shape()[0] as u32;
+    let ny = gold.shape()[1] as u32;
     let gcol = [1.0_f64, 0.78, 0.23];
     let rcol = [0.72_f64, 0.25, 0.05];
-    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(n, n);
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(nx, ny);
     for (px, py, p) in img.enumerate_pixels_mut() {
-        let i = (n - 1 - py) as usize; // flip y for an upright image
-        let j = px as usize;
+        let i = px as usize;
+        let j = (ny - 1 - py) as usize; // flip y for an upright image
         let g = gold[[i, j]].max(0.0);
         let r = rust[[i, j]].max(0.0);
         let mut rgb = [0u8; 3];
