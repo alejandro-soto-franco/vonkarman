@@ -22,6 +22,9 @@ use ndarray::{Array2, Zip};
 use ndrustfft::{FftHandler, R2cFftHandler, ndfft, ndfft_r2c, ndifft, ndifft_r2c};
 use num_complex::Complex;
 
+mod body;
+pub use body::Penalisation;
+
 type C = Complex<f64>;
 
 /// Spectral operators on an `nx x ny` periodic grid over `[0, lx) x [0, ly)`.
@@ -264,6 +267,12 @@ pub struct Sim {
     /// any reported total velocity. It carries no vorticity, so it is held
     /// outside the state.
     u_mean: f64,
+    /// Optional penalised body and downstream fringe.
+    body: Option<Penalisation>,
+    /// Cached `exp(-chi * dt / (2 eta_p))` for the Strang half substep.
+    vel_decay: Option<Array2<f64>>,
+    /// Cached `exp(-sigma * dt / 2)` for the Strang half substep.
+    vort_decay: Option<Array2<f64>>,
 }
 
 impl Sim {
@@ -293,6 +302,9 @@ impl Sim {
             ec2,
             v_jet,
             u_mean: 0.0,
+            body: None,
+            vel_decay: None,
+            vort_decay: None,
         }
     }
 
@@ -338,10 +350,64 @@ impl Sim {
         (u, v)
     }
 
+    /// Attach a penalised body. The Strang half-step decay factors are cached
+    /// here, so this must be called after the time step is fixed.
+    pub fn set_body(&mut self, body: Penalisation) {
+        let h = 0.5 * self.dt;
+        self.vel_decay = Some(body.velocity_decay(h));
+        self.vort_decay = Some(body.vorticity_decay(h));
+        self.body = Some(body);
+    }
+
+    /// The attached body, if any.
+    pub fn body(&self) -> Option<&Penalisation> {
+        self.body.as_ref()
+    }
+
+    /// One Strang half substep: relax the total velocity toward rest inside the
+    /// body, reform vorticity by a spectral curl (which projects out the
+    /// divergent part the multiplication introduced), then relax vorticity in
+    /// the fringe. Both factors are exact solutions of their term.
+    ///
+    /// `u_mean` is folded into the velocity before the decay multiply, not
+    /// after: the mask gradient crossed with the oncoming stream is what
+    /// generates vorticity at the body, so decaying only the vortical part
+    /// would leave `curl` at zero wherever the vortical velocity started at
+    /// zero, and a body that never sheds.
+    fn penalisation_half_step(&mut self) {
+        let (Some(vd), Some(wd)) = (self.vel_decay.as_ref(), self.vort_decay.as_ref()) else {
+            return;
+        };
+        let (mut u, mut v) = self.spec.velocity(&self.wh);
+        u += self.u_mean;
+        Zip::from(&mut u).and(&mut v).and(vd).for_each(|u, v, &f| {
+            *u *= f;
+            *v *= f;
+        });
+        let mut wh = self.spec.curl(&u, &v);
+        let w = self.spec.inverse(&wh);
+        let mut damped = w;
+        Zip::from(&mut damped).and(wd).for_each(|w, &f| *w *= f);
+        wh = self.spec.forward(&damped);
+        self.wh = wh;
+    }
+
+    /// One full step: a Strang-split penalisation half substep either side of
+    /// the IF-RK4 step when a body is attached, otherwise the IF-RK4 step alone.
+    pub fn step(&mut self) {
+        if self.body.is_some() {
+            self.penalisation_half_step();
+            self.step_ifrk4();
+            self.penalisation_half_step();
+        } else {
+            self.step_ifrk4();
+        }
+    }
+
     /// One IF-RK4 step for vorticity + the two dyes, sharing one velocity per
     /// stage. Standard integrating-factor RK4 (reduces to RK4 with zero
     /// viscosity, exact with zero nonlinear term).
-    pub fn step(&mut self) {
+    fn step_ifrk4(&mut self) {
         let dt = self.dt;
         let s = &self.spec;
         let vjet = &self.v_jet;

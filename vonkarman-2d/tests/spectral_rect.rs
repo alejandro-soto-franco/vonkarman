@@ -79,9 +79,14 @@ fn new_square_reproduces_the_legacy_box() {
 use vonkarman_2d::Sim;
 
 /// A compact vorticity blob in a uniform stream translates at the stream speed.
+///
+/// Sized to run in about a second in debug (workspace test budget, see
+/// `CLAUDE.md`): a 32 x 16 grid over 100 steps rather than 128 x 64 over 500,
+/// with `dt` raised so the total advected distance (and so the signal a
+/// missing, halved or sign-flipped mean flow would produce) is unchanged.
 #[test]
 fn mean_flow_advects_a_blob_downstream() {
-    let (nx, ny, lx, ly) = (128, 64, 4.0 * TAU, 2.0 * TAU);
+    let (nx, ny, lx, ly) = (32, 16, 4.0, 2.0);
     let s = Spectral2D::new(nx, ny, lx, ly);
     let (dx, dy) = s.spacing();
     let (cx, cy) = (0.25 * lx, 0.5 * ly);
@@ -97,8 +102,8 @@ fn mean_flow_advects_a_blob_downstream() {
     let wh = s.forward(&omega);
     let zero = Array2::<num_complex::Complex<f64>>::zeros(wh.raw_dim());
     let u_mean = 1.0;
-    let dt = 2.0e-3;
-    let steps = 500;
+    let dt = 1.0e-2;
+    let steps = 100;
     let mut sim = Sim::new(s, wh, zero.clone(), zero, dt, 1.0e-4, 1.0e-4);
     sim.set_mean_flow(u_mean);
     for _ in 0..steps {
