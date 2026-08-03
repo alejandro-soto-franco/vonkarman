@@ -247,6 +247,51 @@ fn the_body_force_matches_the_closed_form_first_substep() {
     );
 }
 
+/// Attaching a body clears the force recorded for the previous one.
+///
+/// `body_force()` gates on a body being attached, not on a step having run
+/// with that body, so leaving `last_body_force` in place across `set_body`
+/// makes a public accessor report the old body's drag until the next step
+/// overwrites it. Measured at 96 x 48 with a radius 2.0 body replaced by a
+/// radius 0.1 one, the stale value overstated the new body's drag by 68 times.
+#[test]
+fn attaching_a_body_clears_the_previous_body_s_force() {
+    let (s, cx, cy, _radius, d) = setup(96, 48);
+    let (dx, _dy) = s.spacing();
+    let u_mean = 1.0_f64;
+    let nu = u_mean * d / 100.0; // Re = 100
+    let dt = 0.25 * dx / u_mean;
+    let zero = Array2::<Complex<f64>>::zeros((s.nx(), s.ny() / 2 + 1));
+    let big = Penalisation::cylinder(&s, cx, cy, 2.0, 1e-3, 20.0, 3.0, 5.0);
+    let mut sim = Sim::new(s, zero.clone(), zero.clone(), zero, dt, nu, nu);
+    sim.set_mean_flow(u_mean);
+    sim.set_body(big);
+    sim.step();
+    let big_force = sim.body_force();
+    assert!(big_force.0 > 0.0, "big body drag {:?}", big_force);
+
+    let small = Penalisation::cylinder(&sim.spec, cx, cy, 0.1, 1e-3, 20.0, 3.0, 5.0);
+    sim.set_body(small);
+    let right_after = sim.body_force();
+    println!(
+        "after step with the big body: {big_force:?}, immediately after set_body: {right_after:?}"
+    );
+    assert_eq!(
+        right_after,
+        (0.0, 0.0),
+        "body_force reported {right_after:?} for a body no step has run with"
+    );
+
+    sim.step();
+    let small_force = sim.body_force();
+    println!("after one step with the new body: {small_force:?}");
+    assert!(
+        small_force.0 > 0.0 && small_force.0 < 0.5 * big_force.0,
+        "the new body's drag should be its own and much smaller: {small_force:?} against \
+         {big_force:?}"
+    );
+}
+
 /// Cheap always-run check on [`Sim::body_force`]: unlike the Angot estimator
 /// it replaced, the momentum-removed force should not depend strongly on
 /// `eta_p`. A body in a uniform stream should feel drag along `+x` at every

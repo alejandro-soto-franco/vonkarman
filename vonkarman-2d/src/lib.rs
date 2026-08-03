@@ -374,11 +374,16 @@ impl Sim {
 
     /// Attach a penalised body. The Strang half-step decay factors are cached
     /// here, so this must be called after the time step is fixed.
+    ///
+    /// The recorded force is cleared, since [`Self::body_force`] gates on a
+    /// body being attached rather than on a step having run with it, and would
+    /// otherwise report the previous body's force for this one.
     pub fn set_body(&mut self, body: Penalisation) {
         let h = 0.5 * self.dt;
         self.vel_decay = Some(body.velocity_decay(h));
         self.vort_decay = Some(body.vorticity_decay(h));
         self.body = Some(body);
+        self.last_body_force = (0.0, 0.0);
     }
 
     /// The attached body, if any.
