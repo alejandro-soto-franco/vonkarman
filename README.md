@@ -116,7 +116,7 @@ Currently `f64`. The `Float` trait is designed for multi-precision: double-doubl
 # Unit tests (fast, ~25s)
 cargo test --lib
 
-# Full suite including integration tests (~100s)
+# Full suite including integration tests (>10 min; use -p <crate> for a single crate)
 cargo test
 ```
 
