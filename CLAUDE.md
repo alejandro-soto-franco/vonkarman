@@ -6,7 +6,7 @@ Multi-precision pseudospectral Navier-Stokes DNS solver on the periodic torus T^
 
 ```bash
 cargo build --release                        # full workspace build
-cargo test --lib                             # unit tests (~25s)
+cargo test --lib                             # unit tests (~75s)
 cargo test --workspace                       # full suite incl. integration (>10 min; use -p <crate> for a single crate)
 cargo clippy --workspace -- -D warnings      # lint (zero warnings required)
 cargo fmt --check                            # format check

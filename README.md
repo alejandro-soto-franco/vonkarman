@@ -113,7 +113,7 @@ Currently `f64`. The `Float` trait is designed for multi-precision: double-doubl
 ## Tests
 
 ```bash
-# Unit tests (fast, ~25s)
+# Unit tests (~75s)
 cargo test --lib
 
 # Full suite including integration tests (>10 min; use -p <crate> for a single crate)
