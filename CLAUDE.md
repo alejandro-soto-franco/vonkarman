@@ -42,7 +42,7 @@ Solver state lives in **spectral space** (`u_hat`). Physical-space fields are de
 - Edition: Rust 2024
 - Error handling: `thiserror` preferred, `anyhow` secondary
 - Heavy doc comments on every public function
-- Conventional commit messages: `feat/`, `fix/`, `patch/`, `chore/`, `docs/`
+- Conventional commit messages: `feat/`, `fix/`, `patch/`, `chore/`, `docs/`, `test/`, `style/`
 - No Co-Authored-By lines in commits
 - No em dashes in any output
 - Integration tests in `<crate>/tests/` directories
