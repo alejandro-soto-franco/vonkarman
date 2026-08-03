@@ -249,8 +249,8 @@ fn the_body_force_matches_the_closed_form_first_substep() {
 
 /// Attaching a body clears the force recorded for the previous one.
 ///
-/// `body_force()` gates on a body being attached, not on a step having run
-/// with that body, so leaving `last_body_force` in place across `set_body`
+/// `body_force()` gates on a body being attached rather than on a step having
+/// run with that body, so leaving `last_body_force` in place across `set_body`
 /// makes a public accessor report the old body's drag until the next step
 /// overwrites it. Measured at 96 x 48 with a radius 2.0 body replaced by a
 /// radius 0.1 one, the stale value overstated the new body's drag by 68 times.

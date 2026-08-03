@@ -410,8 +410,8 @@ impl Sim {
     /// divergent part the multiplication introduced), then relax vorticity in
     /// the fringe. Both factors are exact solutions of their term.
     ///
-    /// `u_mean` is folded into the velocity while the decay multiply still has
-    /// it to act on: the mask gradient crossed with the oncoming stream is what
+    /// `u_mean` is folded into the velocity while the decay multiply can still
+    /// act on it: the mask gradient crossed with the oncoming stream is what
     /// generates vorticity at the body, so decaying only the vortical part
     /// would leave `curl` at zero wherever the vortical velocity started at
     /// zero, and a body that never sheds.
