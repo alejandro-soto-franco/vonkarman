@@ -285,11 +285,6 @@ pub struct Sim {
     vel_decay: Option<Array2<f64>>,
     /// Cached `exp(-sigma * dt / 2)` for the Strang half substep.
     vort_decay: Option<Array2<f64>>,
-    /// Momentum removed by the penalisation substeps so far in the step in
-    /// progress, `(dpx, dpy)`. Zeroed at the start of a stepped `step()` and
-    /// accumulated once per half substep; divided by `dt` at the end of the
-    /// step to give [`Self::body_force`].
-    force_acc: (f64, f64),
     /// Force per unit span on the body over the last completed step, from
     /// [`Self::body_force`].
     last_body_force: (f64, f64),
@@ -325,7 +320,6 @@ impl Sim {
             body: None,
             vel_decay: None,
             vort_decay: None,
-            force_acc: (0.0, 0.0),
             last_body_force: (0.0, 0.0),
         }
     }
@@ -416,23 +410,28 @@ impl Sim {
     /// divergent part the multiplication introduced), then relax vorticity in
     /// the fringe. Both factors are exact solutions of their term.
     ///
-    /// `u_mean` is folded into the velocity before the decay multiply, not
-    /// after: the mask gradient crossed with the oncoming stream is what
+    /// `u_mean` is folded into the velocity while the decay multiply still has
+    /// it to act on: the mask gradient crossed with the oncoming stream is what
     /// generates vorticity at the body, so decaying only the vortical part
     /// would leave `curl` at zero wherever the vortical velocity started at
     /// zero, and a body that never sheds.
     ///
-    /// Also accumulates the momentum this half substep removes from the flow
-    /// into `force_acc`, for [`Self::body_force`]: per point, the velocity
-    /// removed is `u_before * (1 - vel_decay)`, and `u_before - u_after =
-    /// u_before * (1 - vel_decay)` exactly, so the removed velocity is read
-    /// off during the same pass that applies the decay, before it is
-    /// overwritten, then weighted by the cell area to turn the grid sum into
-    /// an integral.
-    fn penalisation_half_step(&mut self) {
-        let (Some(vd), Some(wd)) = (self.vel_decay.as_ref(), self.vort_decay.as_ref()) else {
-            return;
+    /// Returns the momentum this half substep removes from the flow, for
+    /// [`Self::body_force`]: per point, the velocity removed is `u_before * (1
+    /// - vel_decay)`, and `u_before - u_after = u_before * (1 - vel_decay)`
+    /// exactly, so the removed velocity is read off during the same pass that
+    /// applies the decay, before it is overwritten, then weighted by the cell
+    /// area to turn the grid sum into an integral. Returns `(0.0, 0.0)` when no
+    /// body is attached, having done nothing.
+    fn penalisation_half_step(&mut self) -> (f64, f64) {
+        let (Some(vd), Some(wd), Some(body)) = (
+            self.vel_decay.as_ref(),
+            self.vort_decay.as_ref(),
+            self.body.as_ref(),
+        ) else {
+            return (0.0, 0.0);
         };
+        let area = body.cell_area();
         let (mut u, mut v) = self.spec.velocity(&self.wh);
         u += self.u_mean;
         let mut dpx = 0.0_f64;
@@ -444,35 +443,27 @@ impl Sim {
             dpx += ub * (1.0 - f);
             dpy += vb * (1.0 - f);
         });
-        let area = self
-            .body
-            .as_ref()
-            .expect("vel_decay implies body")
-            .cell_area();
-        self.force_acc.0 += dpx * area;
-        self.force_acc.1 += dpy * area;
         let mut wh = self.spec.curl(&u, &v);
         let w = self.spec.inverse(&wh);
         let mut damped = w;
         Zip::from(&mut damped).and(wd).for_each(|w, &f| *w *= f);
         wh = self.spec.forward(&damped);
         self.wh = wh;
+        (dpx * area, dpy * area)
     }
 
     /// One full step: a Strang-split penalisation half substep either side of
     /// the IF-RK4 step when a body is attached, otherwise the IF-RK4 step alone.
     ///
-    /// When a body is attached, also zeroes the force accumulator before the
-    /// first half substep and, after the second, converts the accumulated
-    /// momentum into a force by dividing by `dt`, ready for
+    /// When a body is attached, the momentum the two half substeps remove is
+    /// summed and divided by `dt`, giving the force ready for
     /// [`Self::body_force`].
     pub fn step(&mut self) {
         if self.body.is_some() {
-            self.force_acc = (0.0, 0.0);
-            self.penalisation_half_step();
+            let (ax, ay) = self.penalisation_half_step();
             self.step_ifrk4();
-            self.penalisation_half_step();
-            self.last_body_force = (self.force_acc.0 / self.dt, self.force_acc.1 / self.dt);
+            let (bx, by) = self.penalisation_half_step();
+            self.last_body_force = ((ax + bx) / self.dt, (ay + by) / self.dt);
         } else {
             self.step_ifrk4();
         }
