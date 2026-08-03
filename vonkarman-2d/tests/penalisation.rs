@@ -129,10 +129,12 @@ fn the_no_slip_substep_pulls_velocity_toward_rest_inside_the_body() {
 /// scaled roughly as `1 / eta_p`).
 ///
 /// At this grid (96 x 48, 8 steps) the spread measured 22.29% when this test
-/// was written. The tolerance below is set to 35%, a round number with
-/// headroom above that measurement and far below the roughly 88% spread
-/// ((20.82 - 2.56) / 20.82) the broken estimator gave over the same three
-/// `eta_p` values at full resolution.
+/// was written. The broken estimator was measured at the same grid and step
+/// count, from the same states, and gave 89.10%. The tolerance below is set to
+/// 35%, a round number with headroom above the first and clear of the second,
+/// so the guard passes the corrected estimator and fails the form a regression
+/// would reintroduce. Both figures come from this configuration rather than
+/// from the full-resolution sweep, whose numbers do not transfer.
 #[test]
 fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
     let drag_at = |eta_p: f64| -> f64 {
