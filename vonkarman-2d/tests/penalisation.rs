@@ -174,23 +174,6 @@ fn the_no_slip_substep_pulls_velocity_toward_rest_inside_the_body() {
     );
 }
 
-/// Cheap always-run check on [`Sim::body_force`]: unlike the Angot estimator
-/// it replaced, the momentum-removed force should not depend strongly on
-/// `eta_p`. A body in a uniform stream should feel drag along `+x` at every
-/// `eta_p` in `{2.5e-4, 1e-3, 4e-3}`, the sixteenfold range the plan's
-/// acceptance criterion sweeps, and the spread `(max - min) / max` across
-/// those three drags should stay well clear of the eightfold swing the
-/// broken estimator produced over the same range (a correct estimator is
-/// exact for the scheme regardless of `eta_p`; the broken one this replaced
-/// scaled roughly as `1 / eta_p`).
-///
-/// At this grid (96 x 48, 8 steps) the spread measured 22.29% when this test
-/// was written. The broken estimator was measured at the same grid and step
-/// count, from the same states, and gave 89.10%. The tolerance below is set to
-/// 35%, a round number with headroom above the first and clear of the second,
-/// so the guard passes the corrected estimator and fails the form a regression
-/// would reintroduce. Both figures come from this configuration rather than
-/// from the full-resolution sweep, whose numbers do not transfer.
 /// [`Sim::body_force`] against a closed-form value, pinning its magnitude.
 ///
 /// The `eta_p` sweep below checks only sign and flatness, both of which a stub
@@ -264,6 +247,27 @@ fn the_body_force_matches_the_closed_form_first_substep() {
     );
 }
 
+/// Cheap always-run check on [`Sim::body_force`]: unlike the Angot estimator
+/// it replaced, the momentum-removed force should not depend strongly on
+/// `eta_p`. A body in a uniform stream should feel drag along `+x` at every
+/// `eta_p` in `{2.5e-4, 1e-3, 4e-3}`, the sixteenfold range the plan's
+/// acceptance criterion sweeps, and the spread `(max - min) / max` across
+/// those three drags should stay well clear of the eightfold swing the
+/// broken estimator produced over the same range (a correct estimator is
+/// exact for the scheme regardless of `eta_p`; the broken one this replaced
+/// scaled roughly as `1 / eta_p`).
+///
+/// At this grid (96 x 48, 8 steps) the spread measured 22.29% when this test
+/// was written. The broken estimator was measured at the same grid and step
+/// count, from the same states, and gave 89.10%. The tolerance below is set to
+/// 35%, a round number with headroom above the first and clear of the second,
+/// so the guard passes the corrected estimator and fails the form a regression
+/// would reintroduce. Both figures come from this configuration rather than
+/// from the full-resolution sweep, whose numbers do not transfer.
+///
+/// This checks sign and flatness only.
+/// [`the_body_force_matches_the_closed_form_first_substep`] above pins the
+/// magnitude, which a stub returning a constant would otherwise slip past.
 #[test]
 fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
     let drag_at = |eta_p: f64| -> f64 {
