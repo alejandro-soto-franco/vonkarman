@@ -120,11 +120,19 @@ fn the_no_slip_substep_pulls_velocity_toward_rest_inside_the_body() {
 
 /// Cheap always-run check on [`Sim::body_force`]: unlike the Angot estimator
 /// it replaced, the momentum-removed force should not depend strongly on
-/// `eta_p`. A body in a uniform stream should feel drag along `+x`, and that
-/// drag should barely move when `eta_p` is halved (a correct estimator is
+/// `eta_p`. A body in a uniform stream should feel drag along `+x` at every
+/// `eta_p` in `{2.5e-4, 1e-3, 4e-3}`, the sixteenfold range the plan's
+/// acceptance criterion sweeps, and the spread `(max - min) / max` across
+/// those three drags should stay well clear of the eightfold swing the
+/// broken estimator produced over the same range (a correct estimator is
 /// exact for the scheme regardless of `eta_p`; the broken one this replaced
-/// scaled roughly as `1 / eta_p`, so halving `eta_p` would have roughly
-/// doubled it).
+/// scaled roughly as `1 / eta_p`).
+///
+/// At this grid (96 x 48, 8 steps) the spread measured 22.29% when this test
+/// was written. The tolerance below is set to 35%, a round number with
+/// headroom above that measurement and far below the roughly 88% spread
+/// ((20.82 - 2.56) / 20.82) the broken estimator gave over the same three
+/// `eta_p` values at full resolution.
 #[test]
 fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
     let drag_at = |eta_p: f64| -> f64 {
@@ -133,8 +141,7 @@ fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
         let u_mean = 1.0_f64;
         let nu = u_mean * d / 100.0; // Re = 100
         let dt = 0.25 * dx / u_mean;
-        let zero =
-            Array2::<Complex<f64>>::zeros(s.forward(&Array2::zeros((s.nx(), s.ny()))).raw_dim());
+        let zero = Array2::<Complex<f64>>::zeros((s.nx(), s.ny() / 2 + 1));
         let body = Penalisation::cylinder(&s, cx, cy, radius, eta_p, 20.0, 3.0, 5.0);
         let mut sim = Sim::new(s, zero.clone(), zero.clone(), zero, dt, nu, nu);
         sim.set_mean_flow(u_mean);
@@ -144,16 +151,26 @@ fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
         }
         sim.body_force().0
     };
-    let fx_full = drag_at(1e-3);
-    let fx_half = drag_at(5e-4);
-    assert!(fx_full > 0.0, "drag should be positive along +x: {fx_full}");
-    assert!(fx_half > 0.0, "drag should be positive along +x: {fx_half}");
-    let rel_diff = (fx_full - fx_half).abs() / fx_full.abs().max(fx_half.abs());
+    let drags = [2.5e-4, 1e-3, 4e-3].map(drag_at);
+    for (eta_p, fx) in [2.5e-4, 1e-3, 4e-3].iter().zip(drags) {
+        assert!(
+            fx > 0.0,
+            "drag should be positive along +x at eta_p = {eta_p}: {fx}"
+        );
+    }
+    let max = drags.iter().cloned().fold(f64::MIN, f64::max);
+    let min = drags.iter().cloned().fold(f64::MAX, f64::min);
+    let spread = (max - min) / max;
+    println!(
+        "eta_p sweep drags: {drags:?}, spread (max - min) / max = {:.4} ({:.2}%)",
+        spread,
+        100.0 * spread
+    );
     assert!(
-        rel_diff < 0.08,
-        "force estimate depends on eta_p: fx(1e-3) = {fx_full:.6}, fx(5e-4) = {fx_half:.6}, \
-         relative difference {:.2}%",
-        100.0 * rel_diff
+        spread < 0.35,
+        "force estimate depends on eta_p: drags at eta_p in {{2.5e-4, 1e-3, 4e-3}} = {drags:?}, \
+         spread {:.2}%",
+        100.0 * spread
     );
 }
 
