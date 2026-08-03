@@ -87,6 +87,8 @@ impl Penalisation {
         assert!(radius > 0.0, "radius must be positive");
         assert!(eta_p > 0.0, "eta_p must be positive");
         assert!(fringe_width > 0.0, "fringe_width must be positive");
+        // A negative rate makes exp(-sigma * h) > 1, an amplifying fringe.
+        assert!(sigma_max >= 0.0, "sigma_max must not be negative");
         let (nx, ny) = (spec.nx(), spec.ny());
         let (dx, dy) = spec.spacing();
         let aspect = (dx / dy).max(dy / dx);

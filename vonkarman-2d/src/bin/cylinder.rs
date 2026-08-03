@@ -49,9 +49,11 @@ impl Config {
     /// divided into by `usize::is_multiple_of` in the frame-write guard,
     /// which never panics: unlike the plain `%` form it used to be, `stride
     /// = 0` would silently write exactly one frame (at `step == spin_up`)
-    /// and then none again, rather than failing loudly. Grid size and box
-    /// length are already asserted by `Spectral2D::new`, so are not repeated
-    /// here.
+    /// and then none again, rather than failing loudly. A negative
+    /// `sigma_max` makes the fringe factor `exp(-sigma * h)` exceed one, so
+    /// the strip amplifies vorticity instead of draining it; zero is allowed
+    /// and means no fringe. Grid size and box length are already asserted by
+    /// `Spectral2D::new`, so are not repeated here.
     fn validate(&self) {
         assert!(
             self.u_mean > 0.0,
@@ -63,6 +65,11 @@ impl Config {
             self.stride > 0,
             "stride must be positive, got {}",
             self.stride
+        );
+        assert!(
+            self.sigma_max >= 0.0,
+            "sigma_max must not be negative, got {}",
+            self.sigma_max
         );
     }
 }
