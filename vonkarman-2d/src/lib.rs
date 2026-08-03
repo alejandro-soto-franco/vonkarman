@@ -417,8 +417,8 @@ impl Sim {
     /// zero, and a body that never sheds.
     ///
     /// Returns the momentum this half substep removes from the flow, for
-    /// [`Self::body_force`]: per point, the velocity removed is `u_before * (1
-    /// - vel_decay)`, and `u_before - u_after = u_before * (1 - vel_decay)`
+    /// [`Self::body_force`]. Per point the velocity removed is
+    /// `u_before * (1 - vel_decay)`, and `u_before - u_after` equals that
     /// exactly, so the removed velocity is read off during the same pass that
     /// applies the decay, before it is overwritten, then weighted by the cell
     /// area to turn the grid sum into an integral. Returns `(0.0, 0.0)` when no
