@@ -16,6 +16,22 @@
 //! The fringe is a strip at the downstream end where vorticity is relaxed to
 //! zero, so the wake does not re-enter the periodic box as inflow.
 //!
+//! The exponential substep leaves the state un-band-limited. Multiplying the
+//! velocity by `exp(-chi * h / eta_p)` is a product in physical space, so it
+//! spreads energy across the whole spectrum, and the mask edge is the sharpest
+//! feature on the grid. The substep applies no 2/3 mask, and masking there is
+//! ruled out: it would truncate the body's vorticity sheet and soften no-slip.
+//! The 2/3 rule the advective term applies removes aliasing only from a state
+//! band-limited to two thirds of `k_max`, so with content above that cutoff
+//! some aliases fold back below it where the mask cannot reach, and the
+//! advection mask therefore does not remove all aliasing. What holds the
+//! residue down is the mask edge width `delta`, which spans about three cells
+//! and so keeps the sharpest feature resolved, together with viscosity, which
+//! drains the top of the spectrum every step. Sharpening `delta` or raising
+//! `sigma_max` both push the residue up.
+//! `the_penalisation_substep_leaves_the_state_close_to_band_limited` in
+//! `tests/penalisation.rs` measures it and holds it under a threshold.
+//!
 //! The force the body exerts on the flow is not computed here. The Angot
 //! estimator `F = (1 / eta_p) * integral(chi * u)` is exact only for an
 //! *explicit* penalisation term, where the interior velocity scales linearly

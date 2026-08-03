@@ -232,6 +232,90 @@ fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
     );
 }
 
+/// The exponential penalisation substep leaves the state close to band-limited.
+///
+/// The substep multiplies the physical velocity by `exp(-chi * h / eta_p)`,
+/// takes the curl and applies the fringe factor, and none of those transforms
+/// applies the 2/3 mask. The 2/3 rule the advective term does apply removes
+/// aliasing only from a state band-limited to two thirds of `k_max`; content
+/// above that cutoff produces aliases that fold back below it, where the mask
+/// cannot reach. Masking after the substep is ruled out, since it would
+/// truncate the body's vorticity sheet, so the residue is held down by the mask
+/// edge width `delta` and by viscosity instead. This measures it, so a change
+/// to either trips a guard.
+///
+/// Measured at 96 x 48 over 24 d x 12 d, Re 100, `eta_p = 1e-3`, `cfl = 0.25`,
+/// as the fraction of `sum(|omega_hat|^2)` above the 2/3 cutoff:
+///
+/// ```text
+///   delta = 0.75 dx.max(dy)   step 1  16.13%   step 8   8.69%
+///   delta = 0.35 dx.max(dy)   step 1  32.63%   step 8  17.58%
+/// ```
+///
+/// The threshold below is 12% on the step-8 fraction, 38% of headroom above the
+/// 8.69% the current edge width produces and well under the 17.58% a mask
+/// sharpened to 0.35 cells produces, the second figure measured at this same
+/// configuration to confirm the guard discriminates rather than only passing.
+/// The grid is rectangular, so this also exercises the dealias mask away from
+/// square cells.
+#[test]
+fn the_penalisation_substep_leaves_the_state_close_to_band_limited() {
+    let (s, cx, cy, radius, d) = setup(96, 48);
+    let (nx, ny) = (s.nx(), s.ny());
+    let (dx, _dy) = s.spacing();
+    let u_mean = 1.0_f64;
+    let nu = u_mean * d / 100.0; // Re = 100
+    let dt = 0.25 * dx / u_mean;
+    let zero = Array2::<Complex<f64>>::zeros((nx, ny / 2 + 1));
+    let body = Penalisation::cylinder(&s, cx, cy, radius, 1e-3, 20.0, 3.0, 5.0);
+    let mut sim = Sim::new(s, zero.clone(), zero.clone(), zero, dt, nu, nu);
+    sim.set_mean_flow(u_mean);
+    sim.set_body(body);
+
+    // Fraction of the enstrophy sum(|omega_hat|^2) carried above the 2/3
+    // cutoff, in mode-index space, matching how Spectral2D builds its mask.
+    // Half-spectrum entries other than j = 0 and j = ny/2 stand for a
+    // conjugate pair, so they count twice.
+    let above_cutoff = |sim: &Sim| -> f64 {
+        let (cutx, cuty) = (nx as f64 / 3.0, ny as f64 / 3.0);
+        let (mut total, mut above) = (0.0_f64, 0.0_f64);
+        for i in 0..nx {
+            let m = if i <= nx / 2 {
+                i as f64
+            } else {
+                i as f64 - nx as f64
+            };
+            for j in 0..(ny / 2 + 1) {
+                let weight = if j == 0 || j == ny / 2 { 1.0 } else { 2.0 };
+                let e = weight * sim.wh[[i, j]].norm_sqr();
+                total += e;
+                if m.abs() > cutx || (j as f64) > cuty {
+                    above += e;
+                }
+            }
+        }
+        above / total
+    };
+
+    sim.step();
+    let after_1 = above_cutoff(&sim);
+    for _ in 0..7 {
+        sim.step();
+    }
+    let after_8 = above_cutoff(&sim);
+    println!(
+        "above-cutoff enstrophy fraction: step 1 = {:.4}%, step 8 = {:.4}%",
+        100.0 * after_1,
+        100.0 * after_8
+    );
+    assert!(
+        after_8 < 0.12,
+        "penalisation substep left {:.2}% of the enstrophy above the 2/3 cutoff \
+         after 8 steps, against 8.69% when this guard was written",
+        100.0 * after_8
+    );
+}
+
 #[test]
 #[ignore = "500 steps at 256 x 128 does not finish within the debug test budget; \
             run with cargo test -p vonkarman-2d --test penalisation --release -- --ignored"]
