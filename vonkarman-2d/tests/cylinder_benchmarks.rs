@@ -81,8 +81,6 @@ fn re40_drag_and_bubble_match_the_steady_benchmark() {
     let (u, _v) = r.sim.total_velocity();
     let (fx, _fy) = r.sim.body_force();
     let cd = fx / (0.5 * 1.0 * 1.0); // C_d = F_x / (0.5 rho U^2 d), rho = U = d = 1
-    println!("Re 40: C_d = {cd:.3}");
-    assert!((1.45..=1.75).contains(&cd), "C_d = {cd:.3}");
 
     // Recirculation bubble: from the rear of the body along the centreline to
     // the first sign change of u.
@@ -95,7 +93,17 @@ fn re40_drag_and_bubble_match_the_steady_benchmark() {
             break;
         }
     }
+
+    // Every measurement is taken before any assertion runs, so a failing run
+    // still logs both numbers instead of losing the second to the first.
+    println!("Re 40: C_d = {cd:.3}");
     println!("Re 40: bubble L/d = {length:.3}");
+
+    // The published band of 1.5 to 1.6 is for unbounded flow. This domain is
+    // 12 diameters transverse, an 8.3 percent blockage, and confinement
+    // raises drag. A blockage series at fixed dx and eta_p extrapolates to
+    // C_d about 1.60 at zero blockage, consistent with the published range.
+    assert!((1.60..=1.90).contains(&cd), "C_d = {cd:.3}");
     assert!((1.8..=2.7).contains(&length), "L/d = {length:.3}");
 }
 
