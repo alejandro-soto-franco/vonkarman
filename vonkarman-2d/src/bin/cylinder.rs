@@ -78,11 +78,13 @@ fn main() {
     let d = 1.0_f64;
     let (lx, ly) = (cfg.lx_d * d, cfg.ly_d * d);
     let spec = Spectral2D::new(cfg.nx, cfg.ny, lx, ly);
-    let (dx, _dy) = spec.spacing();
+    let (dx, dy) = spec.spacing();
     let (cx, cy) = (0.25 * lx, 0.5 * ly);
     let radius = 0.5 * d;
     let nu = cfg.u_mean * d / cfg.re;
-    let dt = 0.25 * dx / cfg.u_mean;
+    // The CFL limit is set by the finer cell axis, so the step follows
+    // `dx.min(dy)`. On the square cells every validated run uses, the two agree.
+    let dt = 0.25 * dx.min(dy) / cfg.u_mean;
 
     let zero = Array2::<Complex<f64>>::zeros((cfg.nx, cfg.ny / 2 + 1));
     let body = Penalisation::cylinder(

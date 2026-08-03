@@ -49,6 +49,14 @@ impl Penalisation {
     ///
     /// The mask edge is smoothed over roughly three cells, which keeps the
     /// Fourier representation of `chi * u` from ringing at the interface.
+    ///
+    /// The edge width is a single physical length sampled along both axes, so
+    /// it is set from the coarser of `dx` and `dy`. Sizing it from `dx` alone
+    /// under-resolves the edge in `y` on tall cells: at a cell aspect ratio of
+    /// 4 the mask becomes a hard 0/1 step in `y`, which is the interface
+    /// ringing the smoothing exists to prevent. The aspect ratio is asserted to
+    /// stay within 2, beyond which the smoothing costs more resolution than the
+    /// geometry is worth.
     #[allow(clippy::too_many_arguments)]
     pub fn cylinder(
         spec: &Spectral2D,
@@ -65,7 +73,14 @@ impl Penalisation {
         assert!(fringe_width > 0.0, "fringe_width must be positive");
         let (nx, ny) = (spec.nx(), spec.ny());
         let (dx, dy) = spec.spacing();
-        let delta = 0.75 * dx;
+        let aspect = (dx / dy).max(dy / dx);
+        assert!(
+            aspect <= 2.0,
+            "cell aspect ratio {aspect} exceeds 2: the mask edge is a single \
+             physical length sampled along both axes, so it under-resolves on \
+             cells this anisotropic"
+        );
+        let delta = 0.75 * dx.max(dy);
         let mut chi = Array2::<f64>::zeros((nx, ny));
         let mut sigma = Array2::<f64>::zeros((nx, ny));
         for i in 0..nx {

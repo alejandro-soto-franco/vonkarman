@@ -17,7 +17,7 @@ fn setup(nx: usize, ny: usize) -> (Spectral2D, f64, f64, f64, f64) {
 fn the_mask_is_one_inside_a_half_at_the_edge_and_zero_outside() {
     // nx = 384, not the brief's 256. At nx = 256 the nearest grid point to
     // the edge sample lands 0.03125 off the true edge,
-    // which is 0.44 delta given delta = 0.75 dx, so chi there is 0.71, not
+    // which is 0.44 delta given delta = 0.75 dx.max(dy), so chi there is 0.71, not
     // 0.5. The chi-within-0.05-of-0.5 window is only about 0.014 wide against
     // a grid spacing of 0.094, far too narrow for the assertion to be
     // reliably satisfiable at that resolution regardless of the mask
@@ -42,6 +42,62 @@ fn the_mask_is_one_inside_a_half_at_the_edge_and_zero_outside() {
         at(cx + 3.0 * radius, cy) < 1e-3,
         "outside {}",
         at(cx + 3.0 * radius, cy)
+    );
+}
+
+/// The mask edge is smoothed along `y` as well as along `x`.
+///
+/// The edge width is one physical length sampled along both axes, so sizing it
+/// from `dx` alone leaves it under-resolved in `y` whenever cells are taller
+/// than they are wide, and a sample line along `x` cannot see that. This runs
+/// 512 x 128 over the same 24 d x 12 d domain, cell aspect ratio `dy / dx = 2`,
+/// the highest [`Penalisation::cylinder`] admits, which is where the difference
+/// is largest. Two shape measures are taken through the body centre along `y`:
+/// grid samples in the transition band `0.05 < chi < 0.95`, and the largest
+/// jump in `chi` between adjacent samples.
+///
+/// Measured on this configuration, edge width from `dx.max(dy)` against
+/// `dx` alone:
+///
+/// ```text
+///   dx.max(dy)   band 4 samples   largest jump 0.5641
+///   dx           band 2 samples   largest jump 0.8277
+/// ```
+///
+/// The thresholds below sit between the two pairs, at 3 samples and 0.70, so
+/// the test passes the edge sized from the coarser axis and fails a return to
+/// the square-grid assumption. The 384 x 128 grid the shape test above uses
+/// cannot carry this guard: at aspect ratio 1.5 the band holds 4 samples either
+/// way.
+#[test]
+fn the_mask_edge_is_smoothed_along_y() {
+    let (s, cx, cy, radius, _d) = setup(512, 128);
+    let (dx, dy) = s.spacing();
+    assert!(
+        (dy / dx - 2.0).abs() < 1e-12,
+        "this test needs anisotropic cells: dy / dx = {}",
+        dy / dx
+    );
+    let body = Penalisation::cylinder(&s, cx, cy, radius, 1e-3, 20.0, 3.0, 5.0);
+    let chi = body.chi();
+    let i = (cx / dx).round() as usize % s.nx();
+    let band = (0..s.ny())
+        .filter(|&j| {
+            let c = chi[[i, j]];
+            c > 0.05 && c < 0.95
+        })
+        .count();
+    let jump = (0..s.ny())
+        .map(|j| (chi[[i, (j + 1) % s.ny()]] - chi[[i, j]]).abs())
+        .fold(0.0_f64, f64::max);
+    println!("transition band samples along y: {band}, largest jump: {jump:.4}");
+    assert!(
+        band >= 3,
+        "mask edge under-resolved along y: only {band} samples in 0.05 < chi < 0.95"
+    );
+    assert!(
+        jump <= 0.70,
+        "mask edge steps along y: largest jump between adjacent samples is {jump:.4}"
     );
 }
 
