@@ -738,7 +738,10 @@ pub fn frame_diagnostics_uhat(
                 for iz in 0..snz {
                     let k2 = ops.k_mag_sq[[ix, iy, iz]];
                     let a = omega_hat[i][[ix, iy, iz]];
-                    lh[[ix, iy, iz]] = Complex { re: -k2 * a.re, im: -k2 * a.im };
+                    lh[[ix, iy, iz]] = Complex {
+                        re: -k2 * a.re,
+                        im: -k2 * a.im,
+                    };
                 }
             }
         }
