@@ -16,6 +16,16 @@
 //! Vorticity transport:  d(omega)/dt + u . grad(omega) = nu lap(omega)
 //! Dye transport:        d(c)/dt     + u . grad(c)     = kappa lap(c)
 //! with u = (d(psi)/dy, -d(psi)/dx) and lap(psi) = -omega.
+//!
+//! A stationary bluff body is available through [`Penalisation`]: a Brinkman
+//! volume penalisation applied as an exact exponential substep, Strang split
+//! around the IF-RK4 step, with vorticity reformed by a spectral curl. A
+//! uniform stream is set with [`Sim::set_mean_flow`], and a downstream fringe
+//! relaxes vorticity to zero so the wake does not re-enter as inflow.
+//!
+//! Penalised body transport:
+//!   d(omega)/dt + (u + U e_x) . grad(omega)
+//!       = nu lap(omega) - curl[chi / eta_p * u] - sigma(x) omega
 
 use image::{ImageBuffer, Rgb};
 use ndarray::{Array2, Zip};

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### 2D bluff bodies
+- `Spectral2D` generalised from a square `n x n` box over `[0, 2 pi)^2` to `nx x ny` over `[0, lx) x [0, ly)`, with physical wavenumbers and the 2/3 dealias mask kept in mode-index space. `Spectral2D::new_square` preserves the old constructor.
+- `Penalisation`: Brinkman volume penalisation of a stationary circular cylinder with a `tanh`-smoothed mask, applied as an exact exponential substep Strang split around IF-RK4, so the penalisation parameter is free of the step size. Vorticity is reformed by a spectral curl, which doubles as the Helmholtz projection.
+- Downstream fringe relaxing vorticity to zero, so a wake does not re-enter the periodic box as inflow.
+- `Sim::set_mean_flow` for a uniform stream, entering advection only.
+- `Sim::streamfunction` returning the Poisson solve plus the analytic `u_mean * y` mean part.
+- `.npy` frame export (`psi`, `omega`, `speed`, `mask`) with a `meta.json` sidecar, and a `cylinder` driver binary taking a TOML config.
+- Validation against published benchmarks: `C_d` and recirculation length at Re 40, Strouhal number at Re 100, both ignored by default.
+- Fixed a latent index transposition in `write_dye_png` that was masked by the grid being square.
+
 ### Resident GPU memory
 - ETD-RK4 stage fold: the resident solver now holds three spectral stage triples instead of four by folding `n23 = n2 + n3` in place after the stage-4 combination and reusing the freed buffer for `n4`. Two new `#[cuda_module]` kernels (`cplx_add_assign`, a bit-identical `add.f64`; `etd_final_folded`) regenerated into the checked-in PTX via `cargo oxide build`. The folded final reproduces the four-buffer `etd_final` value to the CPU FMA reference at the same tolerance (not bit-identical to the GPU `etd_final` kernel, which the backend regroups sub-ULP); the full resident step still matches the CPU solver to 1.52e-15. Buffer-only footprint drops ~387 MiB at 256^3 (6.420 to 6.042 GiB) and ~48 MiB at 128^3.
 

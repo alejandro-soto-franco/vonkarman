@@ -7,7 +7,7 @@ Multi-precision pseudospectral Navier-Stokes DNS solver on the periodic torus T^
 ```bash
 cargo build --release                        # full workspace build
 cargo test --lib                             # unit tests (~25s)
-cargo test --workspace                       # full suite incl. integration (~45s)
+cargo test --workspace                       # full suite incl. integration (>10 min; use -p <crate> for a single crate)
 cargo clippy --workspace -- -D warnings      # lint (zero warnings required)
 cargo fmt --check                            # format check
 ```
@@ -32,6 +32,7 @@ Output: `<output_dir>/diagnostics.parquet` (queryable with DuckDB/Polars).
 | `vonkarman-diag` | ScalarDiagnostics, EnergySpectrum, ConservationAudit |
 | `vonkarman-io` | HDF5 snapshot writer/reader |
 | `vonkarman-bin` | CLI (clap), TOML config, Parquet writer |
+| `vonkarman-2d` | 2D pseudospectral vorticity-streamfunction solver, dyes, penalised bluff bodies |
 
 Solver state lives in **spectral space** (`u_hat`). Physical-space fields are derived via inverse FFT. Dealiasing uses the 3/2 rule with a separate padded FFT backend.
 

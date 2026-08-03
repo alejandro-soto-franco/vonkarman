@@ -23,6 +23,7 @@ vonkarman/
   vonkarman-diag/       Scalar diagnostics, energy spectrum, conservation audit
   vonkarman-io/         HDF5 snapshots
   vonkarman-bin/        CLI binary (TOML config, Parquet output)
+  vonkarman-2d/         2D pseudospectral vorticity-streamfunction solver, dyes, penalised bluff bodies
 ```
 
 ## Quick start
