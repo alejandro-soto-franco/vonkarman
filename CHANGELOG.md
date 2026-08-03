@@ -6,7 +6,7 @@
 - `Spectral2D` generalised from a square `n x n` box over `[0, 2 pi)^2` to `nx x ny` over `[0, lx) x [0, ly)`, with physical wavenumbers and the 2/3 dealias mask kept in mode-index space. `Spectral2D::new_square` preserves the old constructor.
 - `Penalisation`: Brinkman volume penalisation of a stationary circular cylinder with a `tanh`-smoothed mask, applied as an exact exponential substep Strang split around IF-RK4, so the penalisation parameter is free of the step size. Vorticity is reformed by a spectral curl, which doubles as the Helmholtz projection.
 - Downstream fringe relaxing vorticity to zero, so a wake does not re-enter the periodic box as inflow.
-- `Sim::set_mean_flow` for a uniform stream, entering advection only.
+- `Sim::set_mean_flow` for a uniform stream. It carries no vorticity, so it is held outside the state and folded in where it acts: advection, the penalisation substep (where the mask gradient crossed with the stream is what generates vorticity at the body), `Sim::total_velocity` and `Sim::streamfunction`.
 - `Sim::streamfunction` returning the Poisson solve plus the analytic `u_mean * y` mean part.
 - `.npy` frame export (`psi`, `omega`, `speed`, `mask`) with a `meta.json` sidecar, and a `cylinder` driver binary taking a TOML config.
 - Validation against published benchmarks: `C_d` and recirculation length at Re 40, Strouhal number at Re 100, both ignored by default.
