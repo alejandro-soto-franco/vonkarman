@@ -191,6 +191,79 @@ fn the_no_slip_substep_pulls_velocity_toward_rest_inside_the_body() {
 /// so the guard passes the corrected estimator and fails the form a regression
 /// would reintroduce. Both figures come from this configuration rather than
 /// from the full-resolution sweep, whose numbers do not transfer.
+/// [`Sim::body_force`] against a closed-form value, pinning its magnitude.
+///
+/// The `eta_p` sweep below checks only sign and flatness, both of which a stub
+/// returning a constant satisfies, so it cannot catch a wrong `cell_area`, a
+/// missing half substep, a swapped axis pair or any constant factor. The only
+/// other magnitude check on the branch lives in the ignored benchmarks, at 50
+/// minutes and 2 hours.
+///
+/// From rest the first half substep acts on `u = u_mean` and `v = 0` exactly,
+/// so the momentum it removes is
+/// `sum(u_mean * (1 - exp(-chi * h / eta_p))) * dx * dy` with `h = dt/2`, in
+/// closed form. `curl` discards the `k = 0` mode, so `u_mean` is restored at
+/// full strength before the second half substep, and as `dt` tends to zero the
+/// second half removes the same amount. `body_force().0 * dt` divided by that
+/// closed form therefore tends to 2.
+///
+/// Measured at 96 x 48 over 24 d x 12 d, Re 100, `eta_p = 1e-3`, one step:
+///
+/// ```text
+///   cfl 0.250   ratio 1.5886   fy/fx 2.8e-5
+///   cfl 0.050   ratio 1.6101   fy/fx 1.8e-5
+///   cfl 0.010   ratio 1.7548   fy/fx 3.0e-6
+///   cfl 0.002   ratio 1.9269   fy/fx 4.5e-7
+/// ```
+///
+/// This test runs the last row, where the measurement is 1.9269 and
+/// 4.526e-7. The band is 1.85 to 2.05, clearing the measurement on both sides,
+/// and the symmetry bound is 1e-5, over twentyfold above what was measured. A
+/// stub `fn body_force(&self) -> (f64, f64) { (1.0, 0.0) }` gives a ratio of
+/// 2.5e-3 here and fails.
+#[test]
+fn the_body_force_matches_the_closed_form_first_substep() {
+    let (s, cx, cy, radius, d) = setup(96, 48);
+    let (dx, dy) = s.spacing();
+    let u_mean = 1.0_f64;
+    let eta_p = 1e-3_f64;
+    let nu = u_mean * d / 100.0; // Re = 100
+    let cfl = 0.002_f64;
+    let dt = cfl * dx / u_mean;
+    let zero = Array2::<Complex<f64>>::zeros((s.nx(), s.ny() / 2 + 1));
+    let body = Penalisation::cylinder(&s, cx, cy, radius, eta_p, 20.0, 3.0, 5.0);
+    let mut sim = Sim::new(s, zero.clone(), zero.clone(), zero, dt, nu, nu);
+    sim.set_mean_flow(u_mean);
+    sim.set_body(body);
+
+    // Momentum the first half substep removes, in closed form. From rest the
+    // state is u = u_mean and v = 0 exactly at every point, so the removed
+    // velocity is u_mean * (1 - exp(-chi * h / eta_p)) per point with h = dt/2.
+    let h = 0.5 * dt;
+    let chi = sim.body().expect("body attached").chi();
+    let dp1: f64 = chi
+        .iter()
+        .map(|&c| u_mean * (1.0 - (-c * h / eta_p).exp()))
+        .sum::<f64>()
+        * dx
+        * dy;
+
+    sim.step();
+    let (fx, fy) = sim.body_force();
+    let ratio = fx * dt / dp1;
+    let symmetry = fy.abs() / fx.abs();
+    println!("dp1 = {dp1:.6e}, fx = {fx:.6e}, ratio = {ratio:.4}, fy/fx = {symmetry:.3e}");
+    assert!(
+        (1.85..=2.05).contains(&ratio),
+        "body force over the closed-form first substep is {ratio:.4}, outside 1.85 to 2.05: \
+         fx = {fx:.6e}, dt = {dt:.6e}, dp1 = {dp1:.6e}"
+    );
+    assert!(
+        symmetry < 1e-5,
+        "transverse force should vanish by symmetry: fy / fx = {symmetry:.3e}"
+    );
+}
+
 #[test]
 fn the_body_force_estimate_is_stable_under_a_change_in_eta_p() {
     let drag_at = |eta_p: f64| -> f64 {
