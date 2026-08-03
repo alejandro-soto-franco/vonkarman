@@ -1,5 +1,6 @@
 //! Cylinder validation against published benchmarks. All ignored by default:
-//! each integrates for minutes. Run with
+//! the Re 40 case takes about 50 minutes and the Re 100 case about 2 hours,
+//! both at 1024 x 512 in release. Run with
 //!
 //!   cargo test -p vonkarman-2d --test cylinder_benchmarks --release -- --ignored --nocapture
 
@@ -69,7 +70,7 @@ fn build(nx: usize, ny: usize, re: f64, seed_asymmetry: bool) -> Run {
 }
 
 #[test]
-#[ignore = "integrates for minutes"]
+#[ignore = "about 50 minutes at 1024 x 512 in release, 120 convective times"]
 fn re40_drag_and_bubble_match_the_steady_benchmark() {
     // Steady at Re 40, so no symmetry seed is needed or wanted.
     let mut r = build(1024, 512, 40.0, false);
@@ -108,7 +109,7 @@ fn re40_drag_and_bubble_match_the_steady_benchmark() {
 }
 
 #[test]
-#[ignore = "integrates for minutes"]
+#[ignore = "about 2 hours at 1024 x 512 in release, 220 convective times"]
 fn re100_shedding_frequency_matches_the_benchmark() {
     let mut r = build(1024, 512, 100.0, true);
     // Discard 100 convective times of transient, then sample for 120 more.
@@ -146,7 +147,17 @@ fn re100_shedding_frequency_matches_the_benchmark() {
             crossings += 1;
         }
     }
-    let first = first.expect("no shedding detected");
+    // Everything the failure needs is printed before the expect, so a run that
+    // detects no shedding after two hours still reports what it sampled.
+    let (lo, hi) = series
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+    println!(
+        "Re 100: {crossings} upward crossings over {} samples, mean {mean:.6e}, \
+         range {lo:.6e} to {hi:.6e}",
+        series.len()
+    );
+    let first = first.expect("no shedding detected: see the crossing count and range above");
     assert!(crossings >= 4, "only {crossings} cycles sampled");
     let period_samples = (last - first) as f64 / (crossings - 1) as f64;
     let period = period_samples * sample_every as f64 * r.dt;
