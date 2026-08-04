@@ -11,6 +11,10 @@
 - `.npy` frame export (`psi`, `omega`, `speed`, `mask`) with a `meta.json` sidecar, and a `cylinder` driver binary taking a TOML config.
 - Validation against published benchmarks: `C_d` and recirculation length at Re 40, Strouhal number at Re 100, both ignored by default.
 - Fixed a latent index transposition in `write_dye_png` that was masked by the grid being square.
+- `cylinder` can now checkpoint and resume, so a long run survives an interruption. Two changes affect any reader of a run's output directory:
+  - `meta.json` gains a `complete` key (boolean). It is `false` from the moment the run starts until the process reaches its own configured step count, then `true`. A reader that builds a fixed-field record from `meta.json` and does not expect this key will raise a type error on it; add the field.
+  - While `complete` is `false`, `frames` is a planned count, not the number of files actually written yet: an interrupted run can leave fewer `.npy` files than `frames` claims. Trust the files present in the directory, not `frames`, until `complete` is `true`.
+  - A new `checkpoint.bin` file may appear in the output directory. It is solver state for resuming, not a rendered field; nothing downstream needs to read it, and it is safe to delete once `complete` is `true`.
 
 ### Resident GPU memory
 - ETD-RK4 stage fold: the resident solver now holds three spectral stage triples instead of four by folding `n23 = n2 + n3` in place after the stage-4 combination and reusing the freed buffer for `n4`. Two new `#[cuda_module]` kernels (`cplx_add_assign`, a bit-identical `add.f64`; `etd_final_folded`) regenerated into the checked-in PTX via `cargo oxide build`. The folded final reproduces the four-buffer `etd_final` value to the CPU FMA reference at the same tolerance (not bit-identical to the GPU `etd_final` kernel, which the backend regroups sub-ULP); the full resident step still matches the CPU solver to 1.52e-15. Buffer-only footprint drops ~387 MiB at 256^3 (6.420 to 6.042 GiB) and ~48 MiB at 128^3.
