@@ -379,16 +379,22 @@ fn resume_refuses_a_cadence_mismatch() {
 /// straight to `checkpoint.bin`, since neither observes *how* the file was
 /// replaced, only its final content.
 ///
-/// This test does observe how: it pre-creates `checkpoint.bin` as a
-/// read-only file. A direct write opens that existing file and fails with a
-/// permission error (file mode restricts the owner too, not just other
-/// users). The correct atomic path creates a *new* temp file, unaffected by
-/// the target's permissions, and only ever touches `checkpoint.bin` through
-/// `rename`, which replaces a directory entry regardless of the old file's
-/// mode and so succeeds.
+/// This test does observe how, without relying on a permission bit. An
+/// earlier version pre-created `checkpoint.bin` read-only and expected a
+/// direct write to fail on that permission, the same fail-open pattern the
+/// end-to-end fidelity test's M9 guard had (see its doc comment): under
+/// root, where permission bits are not enforced, a direct write would
+/// succeed on the read-only file exactly as the correct rename path does,
+/// so the mutation this test exists to catch would pass silently. Instead,
+/// this pre-creates `checkpoint.bin` as an ordinary, writable placeholder
+/// and records its inode. `rename(2)` always gives the replacing file a
+/// fresh inode, whatever the old file's mode; a direct write (open the
+/// existing file, truncate, write) keeps the same inode. So the inode
+/// changing is exactly the property "replaced via rename, not written in
+/// place" under any uid, with no write ever needing to be refused.
 #[test]
 fn write_checkpoint_replaces_the_target_via_rename_not_a_direct_write() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::MetadataExt;
 
     let (spec, wh, gh, rh) = seed_state();
     let params = params_for(&spec, 1e-3);
@@ -396,20 +402,24 @@ fn write_checkpoint_replaces_the_target_via_rename_not_a_direct_write() {
     let target = dir.join("checkpoint.bin");
 
     std::fs::write(&target, b"placeholder, not a real checkpoint").unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let ino_before = std::fs::metadata(&target)
+        .expect("stat the placeholder checkpoint.bin")
+        .ino();
 
-    let result = export::write_checkpoint(&dir, 1, 0, params, &wh, &gh, &rh);
-
-    // Restore write permission unconditionally before any assert below can
-    // panic, so a failing run does not leave a read-only file for the OS
-    // temp-dir cleanup (or a later test reusing this directory name) to
-    // trip over.
-    let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644));
-
-    result.expect(
-        "write_checkpoint must replace checkpoint.bin by renaming a temp file onto it, \
-         not by opening and writing to the existing file directly",
+    export::write_checkpoint(&dir, 1, 0, params, &wh, &gh, &rh).expect(
+        "write_checkpoint must succeed, placeholder present or not: the target's mode never \
+         matters to a rename-based replacement",
     );
+
+    let ino_after = std::fs::metadata(&target)
+        .expect("stat checkpoint.bin after write_checkpoint")
+        .ino();
+    assert_ne!(
+        ino_after, ino_before,
+        "checkpoint.bin kept the placeholder's inode after write_checkpoint: it was opened \
+         and written to directly instead of being replaced by renaming a temp file onto it"
+    );
+
     let back = export::read_checkpoint(&dir).unwrap();
     assert_eq!(
         back.wh, wh,
