@@ -187,6 +187,67 @@ fn a_checkpoint_with_a_flipped_payload_byte_is_rejected() {
     );
 }
 
+/// The payload checksum alone leaves the header uncovered, and `step` is the
+/// one header field nothing else cross-checks: the physics fields are
+/// re-verified against a resuming config by `CheckpointParams::verify`, but
+/// `step` and `frame` have no such backstop, and `step` is exactly where a
+/// resume's correctness lives. Flips one byte inside the `step` field
+/// (offset 12, the low byte of the little-endian `u64`), leaving the
+/// payload and the length untouched, and requires `read_checkpoint` to
+/// reject it.
+#[test]
+fn a_checkpoint_with_a_flipped_step_byte_is_rejected() {
+    let (spec, wh, gh, rh) = seed_state();
+    let params = params_for(&spec, 1e-3);
+    let dir = tempdir("flipped-step-byte");
+    export::write_checkpoint(&dir, 8, 2, params, &wh, &gh, &rh).unwrap();
+
+    let path = dir.join("checkpoint.bin");
+    let mut full = std::fs::read(&path).unwrap();
+    full[12] ^= 0xff; // low byte of the `step` field, header offset 12..20
+    std::fs::write(&path, &full).unwrap();
+
+    let err = export::read_checkpoint(&dir)
+        .expect_err("a checkpoint with a flipped step byte must be rejected");
+    assert!(
+        err.to_string().contains("checksum"),
+        "error should name the checksum as the problem, got: {err}"
+    );
+}
+
+/// A corrupt `nx` large enough that sizing a payload for it overflows
+/// `usize` must be rejected, and rejected with a message that reads
+/// correctly. An earlier version of this message read "too large to size a
+/// payload for without overflow", where "for" trails the clause it belongs
+/// to rather than governing an object, before "without overflow" resumes
+/// past it; the fix names the object the checksum could not carry
+/// ("sizing a payload for it would overflow") instead.
+#[test]
+fn a_checkpoint_claiming_an_overflowing_grid_is_rejected_with_no_dangling_preposition() {
+    let (spec, wh, gh, rh) = seed_state();
+    let params = params_for(&spec, 1e-3);
+    let dir = tempdir("overflowing-grid");
+    export::write_checkpoint(&dir, 1, 0, params, &wh, &gh, &rh).unwrap();
+
+    let path = dir.join("checkpoint.bin");
+    let mut full = std::fs::read(&path).unwrap();
+    full[28..36].copy_from_slice(&(1u64 << 58).to_le_bytes()); // nx, header offset 28..36
+
+    std::fs::write(&path, &full).unwrap();
+
+    let err = export::read_checkpoint(&dir)
+        .expect_err("a checkpoint claiming an overflowing grid must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("overflow"),
+        "error should say sizing the payload would overflow, got: {msg}"
+    );
+    assert!(
+        !msg.contains("size a payload for without"),
+        "error should not end a clause on a dangling 'for', got: {msg}"
+    );
+}
+
 #[test]
 fn resume_accepts_a_checkpoint_written_under_identical_params() {
     let (spec, wh, gh, rh) = seed_state();
@@ -583,17 +644,31 @@ fn write_e2e_config(
 /// run all the way to the same final `steps` — even though that resume
 /// silently redid the work the checkpoint existed to save, exactly the
 /// four-day loss this branch exists to prevent. To make that observable,
-/// the frames part A already wrote (indices 0 and 1, steps 0 and 4) are
-/// locked read-only before part B runs. A correct resume starts its loop at
-/// step 6 and never re-evaluates the frame-write guard for steps 0 or 4, so
-/// it never touches those files. A resume that replays from step 0, whether
-/// because it discarded the checkpoint's state or only reset the loop's
-/// step/frame counters, tries to rewrite them and is refused by the
-/// filesystem, which turns "replayed steps already past the checkpoint"
-/// into a failing exit status instead of an accident of matching output.
+/// this test records the inode and modification time of the frames part A
+/// already wrote (indices 0 and 1, steps 0 and 4) before part B runs, and
+/// asserts both are unchanged afterwards. A correct resume starts its loop
+/// at step 6 and never re-evaluates the frame-write guard for steps 0 or 4,
+/// so it never touches those files; either field on either file moving
+/// proves something rewrote them.
+///
+/// This checks the write rather than blocking it, deliberately: an earlier
+/// version of this test instead chmod'd the files read-only and asserted
+/// that `main` failed outright when it tried to rewrite them. That guard
+/// only worked by accident of two things this crate does not control. It
+/// fails open under root, where permission bits are not enforced at all, so
+/// the same binary reports a pass for a build that discards every
+/// checkpoint. And it only catches a rewrite that goes through
+/// `File::create`, which is what `write_frame` uses today; `write_checkpoint`
+/// in `export.rs` already replaces its target by `rename` instead, for
+/// durability, and a mode bit does not stop that. The moment `write_frame`
+/// adopts the same idiom for the same reason, a permission-based guard
+/// becomes a silent no-op. Inode identity catches a `rename`-based
+/// replacement (the new file gets a new inode); modification time catches
+/// an in-place rewrite through the same inode. Together they catch either
+/// strategy, under any uid, without relying on a write being refused.
 #[test]
 fn a_resumed_run_reproduces_the_straight_through_run_end_to_end() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::MetadataExt;
 
     let base = tempdir("e2e-fidelity");
     let straight_dir = base.join("straight");
@@ -616,20 +691,25 @@ fn a_resumed_run_reproduces_the_straight_through_run_end_to_end() {
         .expect("run the cylinder binary, part A of the split");
     assert!(status.success(), "part A of the split run must succeed");
 
-    // Frames 0 and 1 (steps 0 and 4) are already on disk from part A. Lock
-    // them read-only: see the doc comment above for why.
+    // Frames 0 and 1 (steps 0 and 4) are already on disk from part A. Record
+    // each one's identity before part B runs: see the doc comment above for
+    // why inode plus modification time, rather than a permission lock.
     let early_frame_files: Vec<std::path::PathBuf> = ["psi", "omega", "speed"]
         .iter()
         .flat_map(|stem| (0..2u32).map(move |idx| format!("{stem}_{idx:05}.npy")))
         .map(|name| split_dir.join(name))
         .collect();
-    for path in &early_frame_files {
-        let mut perms = std::fs::metadata(path)
-            .unwrap_or_else(|e| panic!("stat {path:?} written by part A: {e}"))
-            .permissions();
-        perms.set_mode(0o400);
-        std::fs::set_permissions(path, perms).unwrap();
-    }
+    let early_frame_identity: Vec<(u64, std::time::SystemTime)> = early_frame_files
+        .iter()
+        .map(|path| {
+            let meta = std::fs::metadata(path)
+                .unwrap_or_else(|e| panic!("stat {path:?} written by part A: {e}"));
+            let mtime = meta
+                .modified()
+                .unwrap_or_else(|e| panic!("modification time of {path:?} written by part A: {e}"));
+            (meta.ino(), mtime)
+        })
+        .collect();
 
     let part_b_cfg = base.join("part-b.toml");
     write_e2e_config(&part_b_cfg, total_steps, &split_dir, 6, true);
@@ -638,22 +718,30 @@ fn a_resumed_run_reproduces_the_straight_through_run_end_to_end() {
         .output()
         .expect("run the cylinder binary, part B (resume) of the split");
 
-    // Restore write permission unconditionally, before the assert below can
-    // panic, so a failing run does not leave read-only files behind for a
-    // later test or the OS temp-dir cleanup to trip over.
-    for path in &early_frame_files {
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o644);
-        let _ = std::fs::set_permissions(path, perms);
-    }
-
     assert!(
         output.status.success(),
-        "part B (resume) of the split run must succeed without rewriting frames already \
-         on disk from part A; a correct resume starts at step 6 and never touches them. \
-         stderr: {}",
+        "part B (resume) of the split run must succeed. stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    for (path, (ino_before, mtime_before)) in early_frame_files.iter().zip(&early_frame_identity) {
+        let meta =
+            std::fs::metadata(path).unwrap_or_else(|e| panic!("stat {path:?} after part B: {e}"));
+        assert_eq!(
+            meta.ino(),
+            *ino_before,
+            "{path:?} has a different inode after the resumed run: a correct resume starts \
+             at step 6 and never rewrites a frame part A already wrote; this one was replaced"
+        );
+        let mtime_after = meta
+            .modified()
+            .unwrap_or_else(|e| panic!("modification time of {path:?} after part B: {e}"));
+        assert_eq!(
+            mtime_after, *mtime_before,
+            "{path:?} was modified during the resumed run: a correct resume starts at step \
+             6 and never rewrites a frame part A already wrote"
+        );
+    }
 
     let mut straight_files: Vec<String> = std::fs::read_dir(&straight_dir)
         .unwrap()
@@ -696,6 +784,75 @@ fn a_resumed_run_reproduces_the_straight_through_run_end_to_end() {
         split_npy_count,
         straight_files.len(),
         "the resumed run should write exactly the frames the straight-through run does, no more"
+    );
+}
+
+/// The ordering fix round 2 required (read and verify the checkpoint before
+/// any write into `output_dir`) has no test of its own:
+/// `resume_through_the_binary_refuses_a_mismatched_config` asserts only the
+/// exit status and the message, nothing about the output directory. Moving
+/// the resume-checkpoint block in `main` back below `write_mask` and the
+/// pre-loop `write_meta` reproduces exactly the defect round 2's C2 named: a
+/// refused resume still clobbers `mask.npy` and `meta.json` before it
+/// panics. This test catches that regression directly, by comparing both
+/// files byte-for-byte across the refused attempt.
+#[test]
+fn a_refused_resume_leaves_mask_and_meta_untouched() {
+    let base = tempdir("e2e-refused-resume-no-clobber");
+    let dir = base.join("out");
+
+    let write_cfg =
+        |path: &std::path::Path, steps: u64, re: f64, checkpoint_every: u64, resume: bool| {
+            std::fs::write(
+                path,
+                format!(
+                    "nx = 16\nny = 8\nlx_d = 4.0\nly_d = 2.0\nre = {re}\nu_mean = 1.0\n\
+                 steps = {steps}\nstride = 4\nspin_up = 0\neta_p = 1e-3\nsigma_max = 5.0\n\
+                 output_dir = \"{}\"\ncheckpoint_every = {checkpoint_every}\nresume = {resume}\n",
+                    dir.display()
+                ),
+            )
+            .unwrap();
+        };
+
+    let write_cfg_path = base.join("write.toml");
+    write_cfg(&write_cfg_path, 6, 100.0, 6, false);
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_cylinder"))
+        .arg(&write_cfg_path)
+        .status()
+        .expect("run the cylinder binary to produce a completed run and its checkpoint");
+    assert!(
+        status.success(),
+        "the checkpoint-producing run must succeed"
+    );
+
+    let mask_before =
+        std::fs::read(dir.join("mask.npy")).expect("mask.npy should exist after the first run");
+    let meta_before =
+        std::fs::read(dir.join("meta.json")).expect("meta.json should exist after the first run");
+
+    let resume_cfg_path = base.join("resume.toml");
+    write_cfg(&resume_cfg_path, 12, 250.0, 6, true); // re disagrees: 100.0 vs 250.0
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cylinder"))
+        .arg(&resume_cfg_path)
+        .output()
+        .expect("run the cylinder binary attempting a mismatched resume");
+    assert!(
+        !output.status.success(),
+        "a resume whose re disagrees with the checkpoint must fail"
+    );
+
+    let mask_after = std::fs::read(dir.join("mask.npy"))
+        .expect("mask.npy should still exist after the refused resume");
+    let meta_after = std::fs::read(dir.join("meta.json"))
+        .expect("meta.json should still exist after the refused resume");
+    assert_eq!(
+        mask_before, mask_after,
+        "a refused resume must not rewrite mask.npy before it refuses"
+    );
+    assert_eq!(
+        meta_before, meta_after,
+        "a refused resume must not rewrite meta.json before it refuses"
     );
 }
 
@@ -756,5 +913,50 @@ fn resume_through_the_binary_refuses_a_mismatched_config() {
     assert!(
         stderr.contains("field 're' disagrees"),
         "the failure should name 're' as the disagreeing field, got stderr: {stderr}"
+    );
+}
+
+/// A resume whose checkpoint is already past the resuming config's `steps`
+/// must refuse, not run zero steps and relabel the finished run underneath
+/// it as a shorter, complete one. Part A runs to completion at `steps = 6`
+/// with `checkpoint_every = 6`, so the checkpoint it leaves is written at
+/// step 6, the same as its own final step. Part B then resumes with `steps
+/// = 3`, so `checkpoint.step (6) > cfg.steps (3)`.
+///
+/// Without this check, `main`'s loop is `for step in start_step..=cfg.steps`
+/// with `start_step = 6`, which is the empty range `6..=3`: no step runs,
+/// `frame` stays at whatever part A left it at, and the process exits 0
+/// having silently relabelled a five-frame-in-progress checkpoint as a
+/// smaller, complete run.
+#[test]
+fn resume_refuses_when_the_checkpoint_is_already_past_the_configured_steps() {
+    let base = tempdir("e2e-checkpoint-ahead-of-steps");
+    let dir = base.join("out");
+
+    let part_a_cfg = base.join("part-a.toml");
+    write_e2e_config(&part_a_cfg, 6, &dir, 6, false);
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_cylinder"))
+        .arg(&part_a_cfg)
+        .status()
+        .expect("run the cylinder binary to produce a checkpoint at step 6");
+    assert!(status.success(), "part A must succeed");
+
+    let part_b_cfg = base.join("part-b.toml");
+    write_e2e_config(&part_b_cfg, 3, &dir, 6, true); // steps = 3 < checkpoint.step = 6
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cylinder"))
+        .arg(&part_b_cfg)
+        .output()
+        .expect("run the cylinder binary resuming into a shorter steps than the checkpoint");
+
+    assert!(
+        !output.status.success(),
+        "a resume whose checkpoint is already past this config's steps must fail, not exit \
+         0 having run zero steps and relabelled the finished run as this shorter one"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains('6') && stderr.contains('3'),
+        "the failure should name both the checkpoint's step (6) and this config's steps \
+         (3), got stderr: {stderr}"
     );
 }
