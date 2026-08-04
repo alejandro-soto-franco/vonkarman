@@ -43,6 +43,9 @@ jobs:
       - name: Integration tests
         run: cargo test --test cli_run -p vonkarman-bin
 
+      - name: vonkarman-2d tests
+        run: cargo test -p vonkarman-2d
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

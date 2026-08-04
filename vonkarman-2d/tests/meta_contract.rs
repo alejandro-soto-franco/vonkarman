@@ -20,6 +20,7 @@ fn meta_serialises_to_exactly_the_documented_keys() {
         stride: 500,
         re: 100.0,
         frames: 5,
+        complete: true,
     };
     let value = serde_json::to_value(&meta).expect("serialise Meta");
     let object = value.as_object().expect("Meta serialises to a JSON object");
@@ -29,6 +30,7 @@ fn meta_serialises_to_exactly_the_documented_keys() {
 
     let mut expected = vec![
         "nx", "ny", "lx", "ly", "u_mean", "radius", "cx", "cy", "dt", "stride", "re", "frames",
+        "complete",
     ];
     expected.sort_unstable();
 
