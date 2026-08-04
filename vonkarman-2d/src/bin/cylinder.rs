@@ -246,6 +246,16 @@ fn main() {
         (sim, 0usize, 0usize)
     };
 
+    // State where the run is starting, on both paths. An operator resuming a
+    // run of days wants to read back that the checkpoint was consumed rather
+    // than infer it from a frame count, and a resume that silently restarted
+    // from zero is visible here in one line.
+    if start_step > 0 {
+        println!("resumed from step {start_step}, frame {frame}");
+    } else {
+        println!("starting from step 0");
+    }
+
     let t0 = std::time::Instant::now();
     for step in start_step..=cfg.steps {
         if step >= cfg.spin_up && (step - cfg.spin_up).is_multiple_of(cfg.stride) {

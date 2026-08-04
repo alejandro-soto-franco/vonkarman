@@ -240,9 +240,13 @@ const CHECKPOINT_VERSION: u32 = 3;
 /// `ny`, `stride`, `spin_up` (six `u64`), then `lx, ly, re, u_mean, dt,
 /// eta_p, sigma_max` (seven `f64`), then the checksum (`u64`).
 const CHECKPOINT_HEADER_LEN: usize = 8 + 4 + 8 * 6 + 8 * 7 + 8;
-/// Byte offset of the checksum field within the header. The checksum
-/// itself is computed and verified with this field's own eight bytes
-/// treated as zero, since the checksum obviously cannot cover itself.
+/// Byte offset of the checksum field within the header. The checksum covers
+/// `header[..CHECKPOINT_CHECKSUM_OFFSET]` followed by the payload, so the
+/// field's own eight bytes are **excluded from the hashed sequence** rather
+/// than hashed as zeros. The distinction matters to anyone reimplementing
+/// the format: hashing 124 header bytes with eight zeros in place of the
+/// checksum gives a different value from hashing the first 116 and then the
+/// payload.
 const CHECKPOINT_CHECKSUM_OFFSET: usize = CHECKPOINT_HEADER_LEN - 8;
 
 /// FNV-1a, 64-bit, over the concatenation of `chunks` in order. Used as

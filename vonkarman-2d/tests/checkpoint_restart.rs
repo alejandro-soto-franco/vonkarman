@@ -651,9 +651,9 @@ fn write_e2e_config(
 /// discards the checkpoint and restarts the loop at step 0 computes the
 /// *same* deterministic trajectory from 0 to `steps` that a correct resume
 /// does, so the two would coincidentally agree once part B is allowed to
-/// run all the way to the same final `steps` — even though that resume
-/// silently redid the work the checkpoint existed to save, exactly the
-/// four-day loss this branch exists to prevent. To make that observable,
+/// run all the way to the same final `steps`, even though that resume
+/// silently redid the work the checkpoint existed to save, which is exactly
+/// the four-day loss this branch exists to prevent. To make that observable,
 /// this test records the inode and modification time of the frames part A
 /// already wrote (indices 0 and 1, steps 0 and 4) before part B runs, and
 /// asserts both are unchanged afterwards. A correct resume starts its loop
@@ -732,6 +732,19 @@ fn a_resumed_run_reproduces_the_straight_through_run_end_to_end() {
         output.status.success(),
         "part B (resume) of the split run must succeed. stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The direct statement of the property, independent of the filesystem.
+    // The inode and modification-time checks below detect a restart from zero
+    // through its side effects on part A's frames; the inode arm needs a
+    // rename, and the modification-time arm needs the clock to resolve two
+    // writes about sixteen milliseconds apart, which a filesystem with
+    // one-second timestamps would not. This line needs neither.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("resumed from step 6"),
+        "part B should report resuming from the checkpoint's step 6; a resume that \
+         discarded the checkpoint reports starting from step 0. Got stdout: {stdout}"
     );
 
     for (path, (ino_before, mtime_before)) in early_frame_files.iter().zip(&early_frame_identity) {
@@ -965,8 +978,10 @@ fn resume_refuses_when_the_checkpoint_is_already_past_the_configured_steps() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains('6') && stderr.contains('3'),
+        stderr.contains("step 6") && stderr.contains("step 3"),
         "the failure should name both the checkpoint's step (6) and this config's steps \
-         (3), got stderr: {stderr}"
+         (3). Matching bare digits would let the tempdir's pid satisfy this by \
+         coincidence, so both are matched with their surrounding word. Got stderr: \
+         {stderr}"
     );
 }
