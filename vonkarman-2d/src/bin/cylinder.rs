@@ -162,6 +162,20 @@ fn main() {
                 cfg.output_dir
             );
         }
+        // A config whose params agree can still name a `steps` shorter than
+        // the checkpoint's own `step`: the loop below is `start_step
+        // ..=cfg.steps`, which is empty when `start_step > cfg.steps`, so
+        // with no check here the process would run zero steps, exit 0, and
+        // overwrite meta.json's `frames`/`complete` to relabel a finished,
+        // longer run as this shorter, complete one.
+        if checkpoint.step > cfg.steps {
+            panic!(
+                "checkpoint in {:?} is already at step {} but this config only runs to step \
+                 {}, refusing to resume: that would relabel the run already recorded there \
+                 as a shorter, complete one instead",
+                cfg.output_dir, checkpoint.step, cfg.steps
+            );
+        }
         Some(checkpoint)
     } else {
         None

@@ -228,16 +228,26 @@ impl CheckpointParams {
 const CHECKPOINT_MAGIC: [u8; 8] = *b"VK2DCKPT";
 /// Checkpoint binary layout version. Bump on any layout change and reject
 /// mismatches outright, rather than trying to read an old layout with the
-/// new offsets. Version 2 added `stride`, `spin_up` and the payload
-/// checksum to version 1's layout.
-const CHECKPOINT_VERSION: u32 = 2;
+/// new offsets. Version 2 added `stride`, `spin_up` and a checksum over the
+/// payload alone to version 1's layout. Version 3 widens that checksum to
+/// cover the header too (with the checksum field itself zeroed), so a
+/// corrupted `step` or `frame` is caught the same way a corrupted payload
+/// byte already was; a version-2 checksum, computed over the payload only,
+/// left every header field, `step` and `frame` included, free to disagree
+/// with what was actually written.
+const CHECKPOINT_VERSION: u32 = 3;
 /// Fixed header length in bytes: magic, version, `step`, `frame`, `nx`,
 /// `ny`, `stride`, `spin_up` (six `u64`), then `lx, ly, re, u_mean, dt,
-/// eta_p, sigma_max` (seven `f64`), then the payload checksum (`u64`).
+/// eta_p, sigma_max` (seven `f64`), then the checksum (`u64`).
 const CHECKPOINT_HEADER_LEN: usize = 8 + 4 + 8 * 6 + 8 * 7 + 8;
+/// Byte offset of the checksum field within the header. The checksum
+/// itself is computed and verified with this field's own eight bytes
+/// treated as zero, since the checksum obviously cannot cover itself.
+const CHECKPOINT_CHECKSUM_OFFSET: usize = CHECKPOINT_HEADER_LEN - 8;
 
-/// FNV-1a, 64-bit, over `data`. Used as [`write_checkpoint`]/
-/// [`read_checkpoint`]'s payload checksum.
+/// FNV-1a, 64-bit, over the concatenation of `chunks` in order. Used as
+/// [`write_checkpoint`]/[`read_checkpoint`]'s checksum, over the header
+/// (with the checksum field zeroed) and the payload together.
 ///
 /// Not cryptographic: it exists to catch a length-preserving corruption (a
 /// flipped byte, a torn write landing on the expected total length by
@@ -245,13 +255,15 @@ const CHECKPOINT_HEADER_LEN: usize = 8 + 4 + 8 * 6 + 8 * 7 + 8;
 /// silently on its own. The production checkpoint lands on btrfs, which
 /// checksums data at rest, but the format itself should not depend on the
 /// filesystem underneath it for that guarantee.
-fn fnv1a64(data: &[u8]) -> u64 {
+fn fnv1a64(chunks: &[&[u8]]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = OFFSET_BASIS;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(PRIME);
+    for chunk in chunks {
+        for &byte in *chunk {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(PRIME);
+        }
     }
     hash
 }
@@ -283,11 +295,20 @@ pub struct Checkpoint {
 ///
 /// Layout: the [`CHECKPOINT_HEADER_LEN`]-byte header (magic, version, `step`,
 /// `frame`, `nx`, `ny`, `stride`, `spin_up`, the seven `f64` physics/
-/// penalisation fields, then the payload checksum), followed by `wh`, `gh`,
-/// `rh` in that order, each as `nx * (ny / 2 + 1)` complex values in the
-/// array's own row-major iteration order, each complex value as two
-/// little-endian `f64` (real, then imaginary). Every integer field is
-/// little-endian too.
+/// penalisation fields, then a checksum covering the rest of the header and
+/// the payload), followed by `wh`, `gh`, `rh` in that order, each as `nx *
+/// (ny / 2 + 1)` complex values in the array's own row-major iteration
+/// order, each complex value as two little-endian `f64` (real, then
+/// imaginary). Every integer field is little-endian too.
+///
+/// **The checksum covers the header, not only the payload.** `step` and
+/// `frame` carry the whole point of resuming; a checksum over the payload
+/// alone would let either flip without detection, since the physics fields
+/// are re-checked against the resuming config by [`CheckpointParams::verify`]
+/// but `step` and `frame` have nothing else to check them. Computed over
+/// the header up to but excluding the checksum field (the header's own
+/// last eight bytes, which cannot cover themselves), followed by the
+/// payload.
 ///
 /// **`f64`, not `f32`.** Frame export casts to `f32` because the renderer
 /// only contours the values; a checkpoint is what re-enters the
@@ -346,17 +367,19 @@ pub fn write_checkpoint(
             payload.extend_from_slice(&c.im.to_le_bytes());
         }
     }
-    let checksum = fnv1a64(&payload);
 
-    let mut buf = Vec::with_capacity(CHECKPOINT_HEADER_LEN + payload.len());
-    buf.extend_from_slice(&CHECKPOINT_MAGIC);
-    buf.extend_from_slice(&CHECKPOINT_VERSION.to_le_bytes());
-    buf.extend_from_slice(&(step as u64).to_le_bytes());
-    buf.extend_from_slice(&(frame as u64).to_le_bytes());
-    buf.extend_from_slice(&(params.nx as u64).to_le_bytes());
-    buf.extend_from_slice(&(params.ny as u64).to_le_bytes());
-    buf.extend_from_slice(&(params.stride as u64).to_le_bytes());
-    buf.extend_from_slice(&(params.spin_up as u64).to_le_bytes());
+    // Build the header with the checksum field itself zeroed, so the
+    // checksum below can cover the rest of the header (`step`, `frame` and
+    // every params field) alongside the payload without covering itself.
+    let mut header = Vec::with_capacity(CHECKPOINT_HEADER_LEN);
+    header.extend_from_slice(&CHECKPOINT_MAGIC);
+    header.extend_from_slice(&CHECKPOINT_VERSION.to_le_bytes());
+    header.extend_from_slice(&(step as u64).to_le_bytes());
+    header.extend_from_slice(&(frame as u64).to_le_bytes());
+    header.extend_from_slice(&(params.nx as u64).to_le_bytes());
+    header.extend_from_slice(&(params.ny as u64).to_le_bytes());
+    header.extend_from_slice(&(params.stride as u64).to_le_bytes());
+    header.extend_from_slice(&(params.spin_up as u64).to_le_bytes());
     for v in [
         params.lx,
         params.ly,
@@ -366,8 +389,19 @@ pub fn write_checkpoint(
         params.eta_p,
         params.sigma_max,
     ] {
-        buf.extend_from_slice(&v.to_le_bytes());
+        header.extend_from_slice(&v.to_le_bytes());
     }
+    header.extend_from_slice(&0u64.to_le_bytes()); // checksum placeholder
+    debug_assert_eq!(header.len(), CHECKPOINT_HEADER_LEN);
+    debug_assert_eq!(
+        &header[CHECKPOINT_CHECKSUM_OFFSET..],
+        0u64.to_le_bytes().as_slice()
+    );
+
+    let checksum = fnv1a64(&[&header[..CHECKPOINT_CHECKSUM_OFFSET], &payload]);
+
+    let mut buf = Vec::with_capacity(CHECKPOINT_HEADER_LEN + payload.len());
+    buf.extend_from_slice(&header[..CHECKPOINT_CHECKSUM_OFFSET]);
     buf.extend_from_slice(&checksum.to_le_bytes());
     buf.extend_from_slice(&payload);
 
@@ -392,9 +426,10 @@ pub fn write_checkpoint(
 ///
 /// Rejects the file outright on a bad magic, an unknown version, a length
 /// that disagrees with what the header's own `nx`/`ny` implies (which is
-/// what a truncated write looks like), or a payload whose checksum
-/// disagrees with the one stored in the header (a length-preserving
-/// corruption, which the length check alone accepts), rather than reading
+/// what a truncated write looks like), or a header-plus-payload checksum
+/// that disagrees with the one stored in the header (a length-preserving
+/// corruption, which the length check alone accepts, whether it lands in
+/// the payload or in a header field such as `step`), rather than reading
 /// past the end or silently zero-filling the gap. Does not check the
 /// recorded parameters against a config to resume into: call
 /// [`CheckpointParams::verify`] on the returned [`Checkpoint::params`] for
@@ -435,7 +470,11 @@ pub fn read_checkpoint(dir: &Path) -> std::io::Result<Checkpoint> {
     let dt = f64_at(92);
     let eta_p = f64_at(100);
     let sigma_max = f64_at(108);
-    let stored_checksum = u64::from_le_bytes(buf[116..124].try_into().unwrap());
+    let stored_checksum = u64::from_le_bytes(
+        buf[CHECKPOINT_CHECKSUM_OFFSET..CHECKPOINT_CHECKSUM_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
 
     let nyh = ny / 2 + 1;
     let array_bytes = 3usize
@@ -444,16 +483,16 @@ pub fn read_checkpoint(dir: &Path) -> std::io::Result<Checkpoint> {
         .and_then(|n| n.checked_mul(16))
         .ok_or_else(|| {
             std::io::Error::other(format!(
-                "checkpoint {path:?} claims a {nx}x{ny} grid, too large to size a payload for \
-                 without overflow; header is almost certainly corrupt"
+                "checkpoint {path:?} claims a {nx}x{ny} grid; sizing a payload for it would \
+                 overflow, so the header is almost certainly corrupt"
             ))
         })?;
     let expected_len = CHECKPOINT_HEADER_LEN
         .checked_add(array_bytes)
         .ok_or_else(|| {
             std::io::Error::other(format!(
-                "checkpoint {path:?} claims a {nx}x{ny} grid, too large to size a payload for \
-                 without overflow; header is almost certainly corrupt"
+                "checkpoint {path:?} claims a {nx}x{ny} grid; sizing a payload for it would \
+                 overflow, so the header is almost certainly corrupt"
             ))
         })?;
     if buf.len() != expected_len {
@@ -463,11 +502,18 @@ pub fn read_checkpoint(dir: &Path) -> std::io::Result<Checkpoint> {
             buf.len()
         )));
     }
-    let actual_checksum = fnv1a64(&buf[CHECKPOINT_HEADER_LEN..]);
+    // Recomputed exactly as write_checkpoint computed it: the header up to
+    // but excluding the checksum field, then the payload, skipping over the
+    // stored checksum's own bytes rather than reading them as data.
+    let actual_checksum = fnv1a64(&[
+        &buf[..CHECKPOINT_CHECKSUM_OFFSET],
+        &buf[CHECKPOINT_CHECKSUM_OFFSET + 8..],
+    ]);
     if actual_checksum != stored_checksum {
         return Err(std::io::Error::other(format!(
-            "checkpoint {path:?} fails its payload checksum (header says {stored_checksum:#x}, \
-             computed {actual_checksum:#x}): the length is right but the content is corrupt"
+            "checkpoint {path:?} fails its checksum (header says {stored_checksum:#x}, \
+             computed {actual_checksum:#x}): the length is right but the header or the \
+             payload is corrupt"
         )));
     }
 
