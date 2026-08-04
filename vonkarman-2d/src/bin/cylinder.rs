@@ -127,6 +127,46 @@ fn main() {
     // `dx.min(dy)`. On the square cells every validated run uses, the two agree.
     let dt = 0.25 * dx.min(dy) / cfg.u_mean;
 
+    let params = export::CheckpointParams {
+        nx: cfg.nx,
+        ny: cfg.ny,
+        lx,
+        ly,
+        re: cfg.re,
+        u_mean: cfg.u_mean,
+        dt,
+        eta_p: cfg.eta_p,
+        sigma_max: cfg.sigma_max,
+        stride: cfg.stride,
+        spin_up: cfg.spin_up,
+    };
+
+    // Read and verify the checkpoint, if resuming, before anything below
+    // writes into output_dir. A resume config that disagrees with the
+    // checkpoint must be refused before the mask and the pre-loop meta.json
+    // are written, not after: writing first and refusing second would
+    // clobber a completed run's mask.npy and mark it incomplete in
+    // meta.json purely from a mistyped resume config, on top of failing to
+    // resume at all.
+    let resumed = if cfg.resume {
+        let checkpoint = export::read_checkpoint(&cfg.output_dir).unwrap_or_else(|e| {
+            panic!(
+                "resume = true but {:?} has no usable checkpoint: {e}. Refusing to \
+                 silently start over: fix output_dir, or set resume = false to start fresh.",
+                cfg.output_dir
+            )
+        });
+        if let Err(msg) = checkpoint.params.verify(params) {
+            panic!(
+                "checkpoint in {:?} does not match this config, refusing to resume: {msg}",
+                cfg.output_dir
+            );
+        }
+        Some(checkpoint)
+    } else {
+        None
+    };
+
     let zero = Array2::<Complex<f64>>::zeros((cfg.nx, cfg.ny / 2 + 1));
     let body = Penalisation::cylinder(
         &spec,
@@ -140,18 +180,6 @@ fn main() {
     );
     let chi = body.chi().clone();
     export::write_mask(&cfg.output_dir, &chi).expect("write mask");
-
-    let params = export::CheckpointParams {
-        nx: cfg.nx,
-        ny: cfg.ny,
-        lx,
-        ly,
-        re: cfg.re,
-        u_mean: cfg.u_mean,
-        dt,
-        eta_p: cfg.eta_p,
-        sigma_max: cfg.sigma_max,
-    };
 
     // Mirrors the loop's own frame-write guard below: a frame is written at
     // step = spin_up, spin_up + stride, ..., up to the largest such step no
@@ -184,20 +212,7 @@ fn main() {
     )
     .expect("write meta");
 
-    let (mut sim, start_step, mut frame) = if cfg.resume {
-        let checkpoint = export::read_checkpoint(&cfg.output_dir).unwrap_or_else(|e| {
-            panic!(
-                "resume = true but {:?} has no usable checkpoint: {e}. Refusing to \
-                 silently start over: fix output_dir, or set resume = false to start fresh.",
-                cfg.output_dir
-            )
-        });
-        if let Err(msg) = checkpoint.params.verify(params) {
-            panic!(
-                "checkpoint in {:?} does not match this config, refusing to resume: {msg}",
-                cfg.output_dir
-            );
-        }
+    let (mut sim, start_step, mut frame) = if let Some(checkpoint) = resumed {
         let mut sim = Sim::new(
             spec,
             checkpoint.wh,
