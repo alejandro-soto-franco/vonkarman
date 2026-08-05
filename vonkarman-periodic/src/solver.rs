@@ -277,7 +277,15 @@ impl Periodic3D {
             &mut n1,
         );
 
-        // Stage 2: temp = exp_half * u_hat + dt * a21 * N1
+        // Stage 2: a = exp_half * u_hat + dt * a21 * N1, with a21 = (1/2) phi_1(Lh/2).
+        //
+        // `a` is retained rather than overwritten because stage 4 propagates it,
+        // not u_hat.
+        let mut a_stage = [
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+            Array3::from_elem(shape, zero),
+        ];
         for c in 0..3 {
             let mut idx = 0;
             for ix in 0..snx {
@@ -286,7 +294,7 @@ impl Periodic3D {
                         let ec = &self.etd_coeffs[idx];
                         let u = self.u_hat[c][[ix, iy, iz]];
                         let n = n1[c][[ix, iy, iz]];
-                        temp[c][[ix, iy, iz]] = Complex {
+                        a_stage[c][[ix, iy, iz]] = Complex {
                             re: ec.exp_half * u.re + dt * ec.a21 * n.re,
                             im: ec.exp_half * u.im + dt * ec.a21 * n.im,
                         };
@@ -295,6 +303,7 @@ impl Periodic3D {
                 }
             }
         }
+        temp.clone_from(&a_stage);
         compute_nonlinear(
             &self.ops,
             self.fft.as_ref(),
@@ -331,27 +340,26 @@ impl Periodic3D {
             &mut n3,
         );
 
-        // Stage 4: temp = exp_full * u_hat + dt * a41 * (2*N3 - N1)
-        // Note: stage 4 uses exp_half * (exp_half * u_hat) for the linear part,
-        // but for ETD-RK4, the intermediate state is:
-        //   temp = exp_half * a + dt * phi1_half * (2*N3 - N1)
-        // where a = exp_half * u_hat from stage 2.
-        // Equivalently: temp = exp_full * u_hat + dt * a41 * (2*N3 - N1)
+        // Stage 4: temp = exp_half * a + dt * a41 * (2*N3 - N1)
+        //
+        // The linear part propagates the stage-2 state `a`, not u_hat. Writing
+        // exp_full * u_hat instead drops the nonlinear content of `a`, since
+        // exp_half * a = exp_full * u_hat + dt * exp_half * a21 * N1 and only
+        // the first term survives.
         for c in 0..3 {
             let mut idx = 0;
             for ix in 0..snx {
                 for iy in 0..sny {
                     for iz in 0..snz {
                         let ec = &self.etd_coeffs[idx];
-                        let u = self.u_hat[c][[ix, iy, iz]];
+                        let a = a_stage[c][[ix, iy, iz]];
                         let dn = Complex {
                             re: 2.0 * n3[c][[ix, iy, iz]].re - n1[c][[ix, iy, iz]].re,
                             im: 2.0 * n3[c][[ix, iy, iz]].im - n1[c][[ix, iy, iz]].im,
                         };
-                        // Use exp_half on the stage-2 intermediate: exp_half * (exp_half * u) = exp_full * u
                         temp[c][[ix, iy, iz]] = Complex {
-                            re: ec.exp_full * u.re + dt * ec.a41 * dn.re,
-                            im: ec.exp_full * u.im + dt * ec.a41 * dn.im,
+                            re: ec.exp_half * a.re + dt * ec.a41 * dn.re,
+                            im: ec.exp_half * a.im + dt * ec.a41 * dn.im,
                         };
                         idx += 1;
                     }
@@ -1416,6 +1424,58 @@ mod tests {
         assert!(
             rel_err < 0.1,
             "energy at t={t}: got {e}, expected ~{expected} (rel_err={rel_err})"
+        );
+    }
+
+    /// ETD-RK4 must reduce to classical RK4 when the linear operator vanishes.
+    ///
+    /// At `nu = 0` every `lambda` is zero, so `exp_full = exp_half = 1`,
+    /// `phi1 = 1`, `phi2 = 1/2` and `phi3 = 1/6`, and the Cox-Matthews stages
+    /// collapse onto the classical Runge-Kutta ones. Any discrepancy is an
+    /// error in the stage coefficients rather than in the exponential
+    /// treatment, which is what makes this the sharpest available test of the
+    /// scheme: it isolates the part the `phi` functions cannot mask.
+    ///
+    /// Regression for the 2026-07-27 defect in which the stages carried `h`
+    /// where Cox-Matthews carries `h/2`, and stage 4 propagated `u_n` rather
+    /// than the stage-2 state.
+    #[test]
+    fn etd_rk4_reduces_to_rk4_at_zero_viscosity() {
+        let n = 16;
+        let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+        let mut solver = Periodic3D::new(grid, 0.0, IcType::TaylorGreen, BackendMode::Cpu);
+
+        let dt = 1.0e-2;
+        solver.dt = dt;
+        solver.recompute_etd();
+
+        let u0 = solver.u_hat.clone();
+        solver.etd_rk4_step();
+        let etd = solver.u_hat.clone();
+
+        let mut rk = u0;
+        crate::rk4::rk4_step(
+            &mut rk,
+            &solver.ops,
+            solver.fft.as_ref(),
+            solver.fft_padded.as_ref(),
+            &solver.grid,
+            0.0,
+            dt,
+        );
+
+        let mut max_abs = 0.0_f64;
+        let mut scale = 0.0_f64;
+        for c in 0..3 {
+            for (a, b) in etd[c].iter().zip(rk[c].iter()) {
+                max_abs = max_abs.max((a.re - b.re).abs()).max((a.im - b.im).abs());
+                scale = scale.max(b.re.abs()).max(b.im.abs());
+            }
+        }
+        let rel = max_abs / scale.max(1e-30);
+        assert!(
+            rel < 1e-12,
+            "ETD-RK4 at nu = 0 does not reproduce RK4: relative difference {rel:e}"
         );
     }
 
