@@ -130,6 +130,9 @@ pub struct ResidentSolver {
     stage_n: [[CplxBuf<f64>; 3]; 3],
     /// ETD intermediate state `temp[3]` on the `N` grid.
     temp: [CplxBuf<f64>; 3],
+    /// The stage-2 state `a = exp_half * u + dt * a21 * n1`, retained because
+    /// stage 4 propagates it rather than `u_hat`.
+    a_stage: [CplxBuf<f64>; 3],
 
     /// One N-grid complex scratch (length `cplx_len`) used only by the resident
     /// CFL path: `u_hat[c]` is copied here before the destructive cuFFT C2R so
@@ -162,6 +165,8 @@ enum NlInput {
     UHat,
     /// The ETD intermediate state `temp`.
     Temp,
+    /// The stage-2 state `a`, which stage 4 propagates.
+    AStage,
 }
 
 impl ResidentSolver {
@@ -273,6 +278,7 @@ impl ResidentSolver {
             alloc_cplx3(&backend, cplx_len),
         ];
         let temp = alloc_cplx3(&backend, cplx_len);
+        let a_stage = alloc_cplx3(&backend, cplx_len);
         let cfl_scratch = backend.alloc_cplx::<f64>(cplx_len);
 
         // ETD coefficient buffers: allocated now, filled by ensure_etd later.
@@ -306,6 +312,7 @@ impl ResidentSolver {
             omega_phys,
             stage_n,
             temp,
+            a_stage,
             cfl_scratch,
             etd_exp_full,
             etd_exp_half,
@@ -441,6 +448,7 @@ impl ResidentSolver {
             let inp: &[CplxBuf<f64>; 3] = match input {
                 NlInput::UHat => &self.u_hat,
                 NlInput::Temp => &self.temp,
+                NlInput::AStage => &self.a_stage,
             };
             let [o0, o1, o2] = &mut self.omega_hat;
             self.backend
@@ -559,6 +567,7 @@ impl ResidentSolver {
             let src_buf: &CplxBuf<f64> = match (kind, input) {
                 (FieldKind::Velocity, NlInput::UHat) => &self.u_hat[c],
                 (FieldKind::Velocity, NlInput::Temp) => &self.temp[c],
+                (FieldKind::Velocity, NlInput::AStage) => &self.a_stage[c],
                 // Vorticity always comes from omega_hat (curl of the input).
                 (FieldKind::Vorticity, _) => &self.omega_hat[c],
             };
@@ -672,11 +681,12 @@ impl ResidentSolver {
     /// The four stages mirror the CPU algebra precisely:
     ///
     /// - stage 1: `n1 = nonlinear(u_hat)` (into stage buffer 0).
-    /// - stage 2: `temp = exp_half * u + dt * a21 * n1`; `n2 = nonlinear(temp)`.
+    /// - stage 2: `a = exp_half * u + dt * a21 * n1`; `n2 = nonlinear(a)`.
     /// - stage 3: `temp = exp_half * u + dt * a21 * n2`; `n3 = nonlinear(temp)`.
     ///   (`a31 == a21`, as in the CPU solver.)
-    /// - stage 4: `temp = exp_full * u + dt * a41 * (2 n3 - n1)`;
-    ///   `n4 = nonlinear(temp)`.
+    /// - stage 4: `temp = exp_half * a + dt * a41 * (2 n3 - n1)`;
+    ///   `n4 = nonlinear(temp)`. The linear part propagates the stage-2 state,
+    ///   which is why `a` is held in its own triple rather than in `temp`.
     /// - final: `u = exp_full * u + dt * (b1 n1 + b23 (n2 + n3) + b4 n4)`.
     ///
     /// Each `nonlinear(temp)` writes directly into the matching stage buffer; no
@@ -709,15 +719,15 @@ impl ResidentSolver {
         // Stage 1: n1 = nonlinear(u_hat) -> slot 0.
         self.nonlinear_into(NlInput::UHat, 0);
 
-        // Stage 2: temp = exp_half * u_hat + dt * a21 * n1; n2 -> slot 1.
-        self.stage_axpy(dt, 0);
-        self.nonlinear_into(NlInput::Temp, 1);
+        // Stage 2: a = exp_half * u_hat + dt * a21 * n1; n2 -> slot 1.
+        self.stage2_axpy(dt);
+        self.nonlinear_into(NlInput::AStage, 1);
 
         // Stage 3: temp = exp_half * u_hat + dt * a21 * n2; n3 -> slot 2.
         self.stage_axpy(dt, 1);
         self.nonlinear_into(NlInput::Temp, 2);
 
-        // Stage 4: temp = exp_full * u_hat + dt * a41 * (2 n3 - n1) (reads n3 in
+        // Stage 4: temp = exp_half * a + dt * a41 * (2 n3 - n1) (reads n3 in
         // slot 2). After this, n3's only remaining use is inside (n2 + n3).
         self.stage4_combine(dt);
 
@@ -769,17 +779,40 @@ impl ResidentSolver {
         }
     }
 
-    /// Stage 4 combination `temp = exp_full * u_hat + dt * a41 * (2 n3 - n1)`,
-    /// per component, on device.
-    fn stage4_combine(&mut self, dt: f64) {
+    /// Stage 2 combination `a = exp_half * u_hat + dt * a21 * n1`, per
+    /// component, on device.
+    ///
+    /// Writes `a_stage` rather than `temp` because stage 3 overwrites `temp`
+    /// while stage 4 still needs `a`.
+    fn stage2_axpy(&mut self, dt: f64) {
         for c in 0..3 {
-            let (temp, stage_n, u_hat) = (&mut self.temp, &self.stage_n, &self.u_hat);
+            let (a_stage, stage_n, u_hat) = (&mut self.a_stage, &self.stage_n, &self.u_hat);
             self.backend
-                .etd_stage4::<f64>(
-                    &self.etd_exp_full,
-                    &self.etd_a41,
+                .etd_stage_axpy::<f64>(
+                    &self.etd_exp_half,
+                    &self.etd_a21,
                     dt,
                     &u_hat[c],
+                    &stage_n[0][c],
+                    &mut a_stage[c],
+                )
+                .expect("ResidentSolver: stage 2 axpy failed");
+        }
+    }
+
+    /// Stage 4 combination `temp = exp_half * a + dt * a41 * (2 n3 - n1)`,
+    /// per component, on device.
+    ///
+    /// The linear part propagates the stage-2 state, not `u_hat`.
+    fn stage4_combine(&mut self, dt: f64) {
+        for c in 0..3 {
+            let (temp, stage_n, a_stage) = (&mut self.temp, &self.stage_n, &self.a_stage);
+            self.backend
+                .etd_stage4::<f64>(
+                    &self.etd_exp_half,
+                    &self.etd_a41,
+                    dt,
+                    &a_stage[c],
                     &stage_n[0][c],
                     &stage_n[2][c],
                     &mut temp[c],

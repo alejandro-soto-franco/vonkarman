@@ -93,11 +93,17 @@ pub struct EtdCoeffs {
     pub exp_full: f64,
     /// e^{lambda * dt/2}
     pub exp_half: f64,
-    /// phi_1(lambda * dt/2) for stages 2 and 3
+    /// (1/2) phi_1(lambda * dt/2) for stage 2.
+    ///
+    /// The half is Cox-Matthews': the stage increment is `(h/2) phi_1(Lh/2) N`,
+    /// and the solver multiplies by the full `h`, so the half lives here.
     pub a21: f64,
-    /// phi_1(lambda * dt/2) for stages 2 and 3
+    /// (1/2) phi_1(lambda * dt/2) for stage 3. Equal to `a21`.
     pub a31: f64,
-    /// phi_1(lambda * dt) for stage 4
+    /// (1/2) phi_1(lambda * dt/2) for stage 4.
+    ///
+    /// The argument is `lambda * dt/2`, not `lambda * dt`: stage 4 advances
+    /// the stage-2 state over a further half step.
     pub a41: f64,
     /// Final combination coefficients.
     /// u_new = exp_full * u + dt * (b1*N1 + b23*(N2+N3) + b4*N4)
@@ -125,9 +131,9 @@ impl EtdCoeffs {
         Self {
             exp_full,
             exp_half,
-            a21: phi1_h,
-            a31: phi1_h,
-            a41: phi1_f,
+            a21: 0.5 * phi1_h,
+            a31: 0.5 * phi1_h,
+            a41: 0.5 * phi1_h,
             b1: phi1_f - 3.0 * phi2_f + 4.0 * phi3_f,
             b23: 2.0 * phi2_f - 4.0 * phi3_f,
             b4: -phi2_f + 4.0 * phi3_f,
@@ -138,6 +144,40 @@ impl EtdCoeffs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At `lambda = 0` the exponential integrator must BE classical RK4.
+    ///
+    /// With no linear operator the integrating factor is the identity and every
+    /// `phi_k` takes its limiting value, so the tableau has to reduce to the
+    /// classical one: stage coefficients `1/2, 1/2, 1/2` and weights
+    /// `1/6, 1/3, 1/3, 1/6`. This is the check the stage-coefficient error
+    /// failed: it carried `a41 = phi_1(lambda h)`, which is `1` at
+    /// `lambda = 0`, twice the classical value, so the scheme was not the
+    /// order-4 method it claimed. Cox-Matthews takes stage 4 from the stage-2
+    /// state over a further half step, which is where the half belongs.
+    #[test]
+    fn reduces_to_classical_rk4_at_zero_lambda() {
+        let c = EtdCoeffs::new(0.0);
+        let tol = 1e-12;
+        for (name, got, want) in [
+            ("exp_full", c.exp_full, 1.0),
+            ("exp_half", c.exp_half, 1.0),
+            ("a21", c.a21, 0.5),
+            ("a31", c.a31, 0.5),
+            ("a41", c.a41, 0.5),
+            ("b1", c.b1, 1.0 / 6.0),
+            ("b23", c.b23, 1.0 / 3.0),
+            ("b4", c.b4, 1.0 / 6.0),
+        ] {
+            assert!(
+                (got - want).abs() < tol,
+                "{name} = {got}, classical RK4 requires {want}"
+            );
+        }
+        // The weights sum to one, so a constant right-hand side advances exactly.
+        let sum = c.b1 + 2.0 * c.b23 + c.b4;
+        assert!((sum - 1.0).abs() < tol, "weights sum to {sum}, expected 1");
+    }
 
     #[test]
     fn phi1_limit_at_zero() {
