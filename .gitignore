@@ -16,7 +16,6 @@
 **/*.exe
 
 # ---------------------------------------------------------------------------
-# Superpowers / local docs (never publish plans or specs to GitHub)
 # ---------------------------------------------------------------------------
 docs/
 
@@ -153,8 +152,6 @@ core.*
 vgcore.*
 
 # AI tooling
-.wolf/
-docs/superpowers/
 
 # Local scratch symlink, never in the published tree
 output
