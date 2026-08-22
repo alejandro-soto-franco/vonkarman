@@ -46,7 +46,7 @@ impl Periodic3D {
 
         // Generate physical-space IC and transform to spectral
         let velocity = match ic {
-            IcType::TaylorGreen => ic::taylor_green::<f64>(&grid),
+            IcType::TaylorGreen { shift } => ic::taylor_green_shifted::<f64>(&grid, shift),
             IcType::Abc { a, b, c } => ic::abc_flow::<f64>(&grid, a, b, c),
             IcType::AntiParallelTubes {
                 circulation,
@@ -768,6 +768,49 @@ pub fn frame_diagnostics_uhat(
     let wmag = w2.mapv(f64::sqrt);
     let wmax = wmag.iter().cloned().fold(0.0_f64, f64::max);
     let eps = 1e-6 * wmax.max(1e-30);
+
+    // Where the nearest vorticity null sits relative to the mesh. Every
+    // direction-field quantity below divides by |omega|, so a null ON a
+    // mesh point is evaluated at the singularity rather than near it. The
+    // unperturbed Taylor-Green datum does exactly that. Measured here,
+    // where |omega| and grad omega are both already in hand, and reported
+    // on every frame so the condition is in the output rather than in the
+    // reader.
+    let (min_vorticity, null_cell_margin) = {
+        let h = grid.dx();
+        let mut min = f64::INFINITY;
+        let mut at = (0usize, 0usize, 0usize);
+        for i in 0..nx {
+            for j in 0..ny {
+                for k in 0..nz {
+                    let w = wmag[[i, j, k]];
+                    if w < min {
+                        min = w;
+                        at = (i, j, k);
+                    }
+                }
+            }
+        }
+        // |grad omega| at that point, Frobenius over the 3x3 of spectral
+        // derivatives. The distance to the null is min|omega| / |grad omega|
+        // to first order; dividing by h states it in cells.
+        let (i, j, k) = at;
+        let mut g2 = 0.0_f64;
+        for a in 0..3 {
+            for b in 0..3 {
+                g2 += gradw(a, b)[[i, j, k]].powi(2);
+            }
+        }
+        let margin = if g2 > 0.0 {
+            min / (g2.sqrt() * h)
+        } else {
+            f64::INFINITY
+        };
+        (min, margin)
+    };
+    // Volume fraction under the floor at which xi is regularised: how much
+    // of the domain the regularisation is holding up.
+    let null_fraction = wmag.iter().filter(|w| **w < eps).count() as f64 / (nx * ny * nz) as f64;
     let xi: [Array3<f64>; 3] = std::array::from_fn(|c| {
         let denom = wmag.mapv(|w| w + eps);
         omega[c] / &denom
@@ -1223,6 +1266,9 @@ pub fn frame_diagnostics_uhat(
         step,
         enstrophy: mean(&w2),
         max_vorticity: wmax,
+        min_vorticity,
+        null_cell_margin,
+        null_fraction,
         f_rms,
         alpha_p_rms,
         rho_all: alpha_p_rms / (f_rms + 1e-30),
@@ -1304,12 +1350,120 @@ mod tests {
     /// wrong Parseval normalisation or a Hermitian weight applied to the wrong axis:
     /// either error moves `full_dissipation` by a large factor while the physical-space
     /// `transverse_dissipation` is unaffected.
+    /// The reported defect, measured through the solver's own vorticity
+    /// rather than the analytic field: the unperturbed datum puts a null on
+    /// a mesh point, and a half-cell shift of the same field clears it.
+    ///
+    /// `null_cell_margin` is the distance from the mesh point attaining
+    /// `min |omega|` to the null it approaches, in cells. Zero means the
+    /// mesh point IS the null and every direction-field column of that
+    /// frame is quadrature artefact.
+    #[test]
+    fn the_unperturbed_datum_is_flagged_and_a_shift_clears_it() {
+        let n = 32;
+        let nu = 0.01;
+        let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+
+        let collocated = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        )
+        .frame_diagnostics();
+        assert!(
+            collocated.null_is_collocated(),
+            "the canonical datum must be flagged: margin {:e}, min |omega| {:e}",
+            collocated.null_cell_margin,
+            collocated.min_vorticity
+        );
+        assert!(
+            collocated.null_collocation_warning().is_some(),
+            "a flagged frame must produce the warning the writer logs"
+        );
+
+        let shifted = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.5 },
+            BackendMode::Cpu,
+        )
+        .frame_diagnostics();
+        assert!(
+            !shifted.null_is_collocated(),
+            "a half-cell shift must clear the nulls: margin {:e}, min |omega| {:e}",
+            shifted.null_cell_margin,
+            shifted.min_vorticity
+        );
+        assert!(
+            shifted.null_collocation_warning().is_none(),
+            "a cleared frame must produce no warning"
+        );
+
+        // The shift translates where the field is read, so the flow is the
+        // same one. Enstrophy is a volume mean of a trigonometric
+        // polynomial and the uniform grid integrates it exactly, so it is
+        // invariant to rounding.
+        let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-300);
+        assert!(
+            rel(shifted.enstrophy, collocated.enstrophy) < 1e-10,
+            "enstrophy moved under the shift: {} vs {}",
+            shifted.enstrophy,
+            collocated.enstrophy
+        );
+        // max |omega| is a SAMPLED extremum, so it does move: the
+        // unperturbed mesh happens to sit on the continuous maximum and a
+        // shifted one reads a half cell off it, low by O(h^2). At n = 32
+        // that is about 1.4 per cent, and it shrinks with the mesh. This
+        // is sampling, not a change of flow.
+        let dropped = rel(shifted.max_vorticity, collocated.max_vorticity);
+        assert!(
+            dropped < 0.05,
+            "max |omega| moved more than sampling an extremum explains: {} vs {}",
+            shifted.max_vorticity,
+            collocated.max_vorticity
+        );
+    }
+
+    /// The direction-field columns the collocation corrupts, measured on
+    /// both data. `xi_energy` is `<|grad xi|^2>`, singular at a null, so the
+    /// collocated value is the artefact the issue describes and the shifted
+    /// one is the flow.
+    #[test]
+    fn the_direction_energy_is_finite_once_the_nulls_are_off_the_mesh() {
+        let n = 32;
+        let nu = 0.01;
+        let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
+        let shifted = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.5 },
+            BackendMode::Cpu,
+        )
+        .frame_diagnostics();
+        assert!(
+            shifted.xi_energy.is_finite() && shifted.xi_energy_fd.is_finite(),
+            "xi energies must be finite off the nulls: {} {}",
+            shifted.xi_energy,
+            shifted.xi_energy_fd
+        );
+        assert_eq!(
+            shifted.null_fraction, 0.0,
+            "no cell should sit under the xi floor once the mesh clears the nulls"
+        );
+    }
+
     #[test]
     fn payoff_instrumentation_is_consistent() {
         let n = 32;
         let nu = 0.01;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let solver = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
         let fd = solver.frame_diagnostics();
 
         assert!(fd.enstrophy > 0.0, "enstrophy should be positive");
@@ -1384,7 +1538,12 @@ mod tests {
         let n = 16;
         let nu = 0.01;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let mut solver = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
 
         let e0 = solver.energy();
         assert!(e0 > 0.0, "initial energy should be positive");
@@ -1411,7 +1570,12 @@ mod tests {
         let n = 32;
         let nu = 0.01;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let mut solver = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
 
         let e0 = solver.energy();
         while solver.time() < 0.5 {
@@ -1443,7 +1607,12 @@ mod tests {
     fn etd_rk4_reduces_to_rk4_at_zero_viscosity() {
         let n = 16;
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let mut solver = Periodic3D::new(grid, 0.0, IcType::TaylorGreen, BackendMode::Cpu);
+        let mut solver = Periodic3D::new(
+            grid,
+            0.0,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
 
         let dt = 1.0e-2;
         solver.dt = dt;
@@ -1486,13 +1655,23 @@ mod tests {
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
 
         // Run 100 steps continuously
-        let mut continuous = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let mut continuous = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
         for _ in 0..100 {
             continuous.step();
         }
 
         // Run 50 steps, checkpoint, restart, run 50 more
-        let mut first_half = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let mut first_half = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
         for _ in 0..50 {
             first_half.step();
         }

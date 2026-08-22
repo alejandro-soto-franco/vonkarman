@@ -58,7 +58,7 @@ pub fn run(
     } else {
         // Parse IC type
         let ic = match config.initial_condition.ic_type.as_str() {
-            "taylor-green" => IcType::TaylorGreen,
+            "taylor-green" => IcType::TaylorGreen { shift: 0.0 },
             "anti-parallel-tubes" | "anti-parallel" => IcType::AntiParallelTubes {
                 circulation: 1.0,
                 core_radius: 0.3,

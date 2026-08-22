@@ -1191,7 +1191,12 @@ mod tests {
         // 0) and performs exactly one etd_rk4_step. We read u_hat and dt at
         // construction, build the resident solver from the SAME state and dt,
         // then step both once and compare.
-        let mut cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let mut cpu = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
         let dt = cpu.dt();
 
         // Snapshot the construction-time spectral velocity (C-order flatten) for
@@ -1293,7 +1298,12 @@ mod tests {
 
             // Take an initial Taylor-Green spectral state and its CFL dt from a
             // CPU solver, then build the resident solver from the same state.
-            let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+            let cpu = Periodic3D::new(
+                grid,
+                nu,
+                IcType::TaylorGreen { shift: 0.0 },
+                BackendMode::Cpu,
+            );
             let dt = cpu.dt();
             let u0 = cpu.u_hat();
             let u_hat_flat = [flat(&u0[0]), flat(&u0[1]), flat(&u0[2])];
@@ -1393,18 +1403,33 @@ mod tests {
             let nu = 0.01;
             let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
 
-            let base = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+            let base = Periodic3D::new(
+                grid,
+                nu,
+                IcType::TaylorGreen { shift: 0.0 },
+                BackendMode::Cpu,
+            );
             let dt = base.dt();
             let u0 = base.u_hat();
             let u_hat_flat = [flat(&u0[0]), flat(&u0[1]), flat(&u0[2])];
             drop(base);
 
             let cpu = {
-                let d = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+                let d = Periodic3D::new(
+                    grid,
+                    nu,
+                    IcType::TaylorGreen { shift: 0.0 },
+                    BackendMode::Cpu,
+                );
                 loops_domain(d, 2, base_steps, base_reps)
             };
             let cufft = {
-                let d = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cufft);
+                let d = Periodic3D::new(
+                    grid,
+                    nu,
+                    IcType::TaylorGreen { shift: 0.0 },
+                    BackendMode::Cufft,
+                );
                 loops_domain(d, 2, base_steps, base_reps)
             };
             let resident = {
@@ -1715,7 +1740,12 @@ mod tests {
 
             // Initial Taylor-Green spectral state from a CPU solver (construction
             // only; no CPU stepping), then build the resident solver from it.
-            let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+            let cpu = Periodic3D::new(
+                grid,
+                nu,
+                IcType::TaylorGreen { shift: 0.0 },
+                BackendMode::Cpu,
+            );
             let u0 = cpu.u_hat();
             let u_hat_flat = [flat(&u0[0]), flat(&u0[1]), flat(&u0[2])];
             let mut solver = ResidentSolver::new(backend, grid, nu, &u_hat_flat);

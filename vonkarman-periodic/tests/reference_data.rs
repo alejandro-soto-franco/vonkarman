@@ -15,7 +15,12 @@ fn taylor_green_re1600_reference() {
     let nu = 6.25e-4; // Re = 1600
     let t_final = 10.0;
     let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-    let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let mut solver = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
 
     let mut peak_enstrophy = 0.0_f64;
     let mut peak_time = 0.0_f64;

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Vorticity nulls on mesh points
+- The unperturbed Taylor-Green datum places its vorticity nulls exactly on the mesh points of a uniform periodic grid with even `n`, and every diagnostic built from the vorticity direction field is singular at a null. At `32^3` the shipped `xi_energy` column reads `1.96e29` there against `5.55` for the same field sampled a half cell away, so the value was quadrature artefact and not flow. `xi_energy_fd` moved from `4.85` to `5.08` over the same pair, which is why it survived: one route to the quantity looked sane.
+- `ic::taylor_green_shifted` samples the field at `x_i = (i + shift) h`, in cells. `IcType::TaylorGreen` takes `shift`, defaulting to `0`, so an existing config reproduces the canonical benchmark unchanged and `shift = 0.5` puts the mesh as far from the null planes as it goes.
+- `FrameDiagnostics` reports `min_vorticity`, `null_cell_margin` (the distance in cells from the mesh point attaining `min |omega|` to the null it approaches) and `null_fraction` (the volume fraction under the floor at which `xi` is regularised). `null_is_collocated` reads the margin against `NULL_COLLOCATION_CELLS`, and `FrameWriter` logs the condition once per run.
+- The three columns are appended to the frame CSV, so a reader mapping by position is unaffected. A test asserts the header and the row agree on column count.
+
 ### 2D bluff bodies
 - `Spectral2D` generalised from a square `n x n` box over `[0, 2 pi)^2` to `nx x ny` over `[0, lx) x [0, ly)`, with physical wavenumbers and the 2/3 dealias mask kept in mode-index space. `Spectral2D::new_square` preserves the old constructor.
 - `Penalisation`: Brinkman volume penalisation of a stationary circular cylinder with a `tanh`-smoothed mask, applied as an exact exponential substep Strang split around IF-RK4, so the penalisation parameter is free of the step size. Vorticity is reformed by a spectral curl, which doubles as the Helmholtz projection.

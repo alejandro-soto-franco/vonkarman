@@ -18,13 +18,23 @@ fn checkpoint_restart_bitwise_match() {
     let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
 
     // Run 100 steps continuously
-    let mut continuous = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let mut continuous = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
     for _ in 0..100 {
         continuous.step();
     }
 
     // Run 50, checkpoint, restart, run 50 more
-    let mut first_half = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let mut first_half = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
     for _ in 0..50 {
         first_half.step();
     }
