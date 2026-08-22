@@ -68,6 +68,33 @@ Output goes to `./output/tg-re1600/diagnostics.parquet`, queryable with DuckDB o
 | Kida-Pelz | Octahedral symmetry | Depletion, high-symmetry blowup |
 | Random isotropic | Von Karman spectrum, Leray-projected | Developed turbulence |
 
+### Vorticity nulls on mesh points
+
+The unperturbed Taylor-Green datum places its vorticity nulls exactly on
+the mesh points of a uniform periodic grid with even `n`. Every diagnostic
+built from the vorticity direction field divides by $|\omega|$ and is
+singular at a null, so a node-collocated null is evaluated AT the
+singularity. At $32^3$ the direction energy $\langle|\nabla\xi|^2\rangle$
+reads `1.96e29` there against `5.55` for the same field sampled a half cell
+away.
+
+`shift` samples the field at $x_i = (i + \mathrm{shift})h$, in cells, which
+moves the mesh off the null planes and leaves the flow alone:
+
+```toml
+[initial_condition]
+type = "taylor-green"
+shift = 0.5
+```
+
+`shift` defaults to `0`, which reproduces the canonical benchmark, nulls
+and all. Every frame reports `min_vorticity`, `null_cell_margin` and
+`null_fraction`, and a run whose margin falls below `1e-3` cells logs a
+warning naming the condition once.
+
+The hazard generalises to any symmetric datum whose critical points land on
+mesh points. Taylor-Green is the common one.
+
 ## Time integration
 
 Two integrators:

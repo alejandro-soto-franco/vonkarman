@@ -23,7 +23,7 @@
 use serde::Serialize;
 
 /// Per-step frame / coherence / pressure diagnostics.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FrameDiagnostics {
     pub time: f64,
     pub step: u64,
@@ -146,6 +146,37 @@ pub struct FrameDiagnostics {
     pub e_grad_omega: f64,
     pub e_grad_rho: f64,
     pub e_laplacian: f64,
+    /// THE COLLOCATION CHECK. Every direction-field quantity below divides
+    /// by `|omega|`, so a null sitting ON a mesh point is evaluated at the
+    /// singularity rather than near it and returns a plausible number that
+    /// is entirely quadrature artefact. The unperturbed Taylor-Green datum
+    /// does exactly that: its nulls lie on the lines `x, y in {0, pi}` of
+    /// the planes `z in {0, pi}`, all mesh points for even `n`. At 128^3
+    /// the geodesic curvature read of order `1e16` there, and a near-null
+    /// share returned exactly `1.0000`.
+    ///
+    /// `min_vorticity` is `min |omega|` over the grid. `null_cell_margin`
+    /// is the distance from the mesh point that attains it to the null it
+    /// is approaching, in cells: `min|omega| / (|grad omega| h)` at that
+    /// point, first order in the mesh. Below about `1e-3` a null is on a
+    /// node in all but name and no direction-field column of that frame
+    /// means anything. `null_fraction` is the volume fraction below the
+    /// `1e-6 max|omega|` floor at which `xi` is regularised, which says how
+    /// much of the domain the regularisation is holding up.
+    ///
+    /// Measured on the canonical datum at 32^3, `xi_energy` reads `1.96e29`
+    /// against `5.55` for the same field sampled a half cell off the nulls,
+    /// with 1.15 per cent of the domain under the floor. At 64^3 it is
+    /// `1.32e28` against `7.13`. The finite-difference column `xi_energy_fd`
+    /// moves from `4.85` to `5.08` over the same pair, which is why the
+    /// condition survived: one route to the quantity looked sane.
+    ///
+    /// The hazard generalises to any symmetric datum whose critical points
+    /// land on mesh points. `ic::taylor_green_shifted` moves the mesh off
+    /// them for the common one.
+    pub min_vorticity: f64,
+    pub null_cell_margin: f64,
+    pub null_fraction: f64,
     /// Log-log slope of the conditional ratio against the conditional mean `|omega|`,
     /// over the bins that carry samples and a positive ratio. THIS IS THE VERDICT:
     /// slope <= 0 means the ratio is bounded or decaying as the vorticity grows, so the
@@ -154,7 +185,38 @@ pub struct FrameDiagnostics {
     pub cond_slope: f64,
 }
 
+/// Below this many cells, a vorticity null is on a mesh point in all but
+/// name and every direction-field column of that frame is quadrature
+/// artefact rather than flow.
+pub const NULL_COLLOCATION_CELLS: f64 = 1e-3;
+
 impl FrameDiagnostics {
+    /// Whether a vorticity null sits close enough to a mesh point to make
+    /// the direction-field columns of this frame meaningless.
+    ///
+    /// The signature is recognisable without this: a near-null share of
+    /// exactly `1.0000`, or a curvature at machine-overflow scale, in a
+    /// flow whose vorticity is smooth and bounded. Recognising it after the
+    /// fact is what this replaces.
+    pub fn null_is_collocated(&self) -> bool {
+        self.null_cell_margin < NULL_COLLOCATION_CELLS
+    }
+
+    /// One line naming the condition, for a caller that logs it. `None`
+    /// when the mesh clears the nulls.
+    pub fn null_collocation_warning(&self) -> Option<String> {
+        self.null_is_collocated().then(|| {
+            format!(
+                "step {}: a vorticity null sits {:.2e} cells from a mesh point \
+                 (min |omega| = {:.3e}, {:.4} of the volume under the xi floor). \
+                 Every direction-field column of this frame is quadrature \
+                 artefact. Use a datum whose critical points miss the mesh: \
+                 taylor-green takes a `shift`.",
+                self.step, self.null_cell_margin, self.min_vorticity, self.null_fraction
+            )
+        })
+    }
+
     /// CSV header matching `csv_row`.
     pub fn csv_header() -> &'static str {
         "step,time,enstrophy,max_vorticity,f_rms,alpha_p_rms,rho_all,rho_hi,\
@@ -163,7 +225,8 @@ nu,production,transverse_dissipation,full_dissipation,payoff_ratio,\
 production_hi,transverse_dissipation_hi,payoff_ratio_hi,transverse_fraction,\
 cond_ratio_q1,cond_ratio_q2,cond_ratio_q3,cond_ratio_q4,cond_rho_q4,cond_slope,\
 cond_slope_stderr,cond_r2,cond_nbins,cond_slope_full,cond_r2_full,cond_ghat_slope,cond_lratio_slope,e_grad_omega,e_grad_rho,e_laplacian,\
-xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,fd_recovery"
+xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,fd_recovery,\
+min_vorticity,null_cell_margin,null_fraction"
     }
 
     /// One CSV row (no trailing newline).
@@ -172,7 +235,8 @@ xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,f
             "{},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
 {:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
 {:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
-{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
+{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},\
+{:.9e},{:.9e},{:.9e}",
             self.step,
             self.time,
             self.enstrophy,
@@ -217,6 +281,57 @@ xi_energy_fd,full_dissipation_grad,parseval_residual,transverse_dissipation_fd,f
             self.parseval_residual,
             self.transverse_dissipation_fd,
             self.fd_recovery,
+            self.min_vorticity,
+            self.null_cell_margin,
+            self.null_fraction,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The header and the row are written by hand from the same field list,
+    /// so they drift apart the moment a column is added to one of them. A
+    /// reader that maps columns by position then reads every value past the
+    /// insertion under the wrong name, silently.
+    #[test]
+    fn the_csv_header_and_row_agree_on_column_count() {
+        let header = FrameDiagnostics::csv_header();
+        let row = FrameDiagnostics::default().csv_row();
+        assert_eq!(
+            header.split(',').count(),
+            row.split(',').count(),
+            "header:\n{header}\nrow:\n{row}"
+        );
+    }
+
+    /// The three columns #1 adds are at the end, where a reader mapping by
+    /// name finds them and one mapping by position is unaffected.
+    #[test]
+    fn the_null_columns_are_present_and_last() {
+        let header = FrameDiagnostics::csv_header();
+        let cols: Vec<&str> = header.split(',').collect();
+        assert_eq!(
+            &cols[cols.len() - 3..],
+            &["min_vorticity", "null_cell_margin", "null_fraction"]
+        );
+    }
+
+    /// `null_is_collocated` reads the margin against one stated threshold,
+    /// so the warning and any downstream filter agree by construction.
+    #[test]
+    fn a_zero_margin_is_collocated_and_a_half_cell_is_not() {
+        let mut d = FrameDiagnostics {
+            null_cell_margin: 0.0,
+            ..FrameDiagnostics::default()
+        };
+        assert!(d.null_is_collocated());
+        assert!(d.null_collocation_warning().is_some());
+
+        d.null_cell_margin = 0.5;
+        assert!(!d.null_is_collocated());
+        assert!(d.null_collocation_warning().is_none());
     }
 }

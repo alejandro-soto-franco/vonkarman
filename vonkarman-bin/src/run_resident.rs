@@ -24,7 +24,7 @@ use vonkarman_periodic::{IcType, Periodic3D, ResidentSolver, frame_diagnostics_u
 /// Parse the config IC string into an `IcType` (mirrors `run::run`).
 fn parse_ic(s: &str) -> Result<IcType, Box<dyn std::error::Error>> {
     Ok(match s {
-        "taylor-green" => IcType::TaylorGreen,
+        "taylor-green" => IcType::TaylorGreen { shift: 0.0 },
         "anti-parallel-tubes" | "anti-parallel" => IcType::AntiParallelTubes {
             circulation: 1.0,
             core_radius: 0.3,

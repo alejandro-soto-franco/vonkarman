@@ -10,7 +10,7 @@ pub use anti_parallel::anti_parallel_tubes;
 pub use colliding_vortex_rings::colliding_vortex_rings;
 pub use kida_pelz::kida_pelz;
 pub use random_isotropic::random_isotropic;
-pub use taylor_green::taylor_green;
+pub use taylor_green::{taylor_green, taylor_green_shifted};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum IcType {
-    TaylorGreen,
+    TaylorGreen {
+        /// Sample the field at `x_i = (i + shift) h`, in cells.
+        ///
+        /// The canonical datum puts its vorticity nulls exactly on the mesh
+        /// points of a uniform periodic grid, where every direction-field
+        /// diagnostic is singular. `shift = 0` keeps that datum, which is
+        /// what a reproduction of the benchmark wants; any fractional shift
+        /// moves the mesh off the null planes, `0.5` maximally so. See
+        /// [`taylor_green_shifted`].
+        #[serde(default)]
+        shift: f64,
+    },
     Abc {
         #[serde(default = "default_one")]
         a: f64,

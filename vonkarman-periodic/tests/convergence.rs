@@ -41,7 +41,12 @@ fn spectral_convergence_taylor_green() {
 
     for &n in &grid_sizes {
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let mut solver = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
 
         while solver.time() < t_final {
             solver.step();
@@ -84,7 +89,12 @@ fn parseval_identity_all_grid_sizes() {
 
     for &n in &grid_sizes {
         let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-        let solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+        let solver = Periodic3D::new(
+            grid,
+            nu,
+            IcType::TaylorGreen { shift: 0.0 },
+            BackendMode::Cpu,
+        );
         let fft = NdrustfftBackend::new(n, n, n);
         let u_hat = solver.u_hat();
 

@@ -16,7 +16,12 @@ fn energy_budget_taylor_green() {
     let n = 32;
     let nu = 0.01;
     let grid = GridSpec::cubic(n, 2.0 * std::f64::consts::PI);
-    let mut solver = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let mut solver = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
 
     // Let the adaptive dt stabilise
     for _ in 0..10 {

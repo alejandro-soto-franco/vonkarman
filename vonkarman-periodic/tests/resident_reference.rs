@@ -144,7 +144,12 @@ fn resident_matches_cpu_trajectory_48() {
     };
 
     // CPU oracle and resident solver from the SAME TG initial state.
-    let mut cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let mut cpu = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
     let u0 = cpu.u_hat();
     let u_hat_flat: [Vec<Complex<f64>>; 3] = [
         u0[0].iter().copied().collect(),
@@ -221,7 +226,12 @@ fn resident_cfl_and_decay_smoke_32() {
         a * b * c
     };
 
-    let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let cpu = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
     let dt0_cpu = cpu.dt();
     let u0 = cpu.u_hat();
     let u_hat_flat: [Vec<Complex<f64>>; 3] = [
@@ -295,7 +305,12 @@ fn taylor_green_re1600_resident_128() {
     // CPU solver only to generate the TG initial spectral state and the
     // construction-time dt (identical IC path to reference_data). We do NOT step
     // the CPU; the resident GPU solver carries the integration.
-    let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let cpu = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
     let dt0_cpu = cpu.dt();
     let u0 = cpu.u_hat();
     let u_hat_flat: [Vec<Complex<f64>>; 3] = [
@@ -449,7 +464,12 @@ fn taylor_green_re1600_resident_256_dissipation() {
     };
 
     // TG IC via the CPU IC path (host only); the resident GPU carries the march.
-    let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let cpu = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
     let dt0_cpu = cpu.dt();
     let u0 = cpu.u_hat();
     let u_hat_flat: [Vec<Complex<f64>>; 3] = [
@@ -585,7 +605,12 @@ fn taylor_green_resident_256_fits_8gb() {
     );
 
     // TG IC via the CPU IC path (host only); upload once into the resident solver.
-    let cpu = Periodic3D::new(grid, nu, IcType::TaylorGreen, BackendMode::Cpu);
+    let cpu = Periodic3D::new(
+        grid,
+        nu,
+        IcType::TaylorGreen { shift: 0.0 },
+        BackendMode::Cpu,
+    );
     let u0 = cpu.u_hat();
     let u_hat_flat: [Vec<Complex<f64>>; 3] = [
         u0[0].iter().copied().collect(),
