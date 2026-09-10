@@ -20,7 +20,7 @@ num-complex = { workspace = true }
 # feature or not. It now points at upstream. NVlabs is moving the host crates
 # (cuda-bindings, cuda-core, cuda-async) into cutile-rs, so this target moves
 # again when that lands.
-cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", optional = true }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa", optional = true }
 # Used only by the `cuda` feature, to load `cudaMemGetInfo` from libcudart for
 # the device-memory probe; same crate the FFT crate uses for cuFFT/cudart.
 libloading = { version = "0.8", optional = true }

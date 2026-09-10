@@ -33,11 +33,11 @@ impl FrameWriter {
 
     /// Append one diagnostics row.
     pub fn write_row(&mut self, d: &FrameDiagnostics) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.warned_null_collocation {
-            if let Some(msg) = d.null_collocation_warning() {
-                tracing::warn!("{msg}");
-                self.warned_null_collocation = true;
-            }
+        if !self.warned_null_collocation
+            && let Some(msg) = d.null_collocation_warning()
+        {
+            tracing::warn!("{msg}");
+            self.warned_null_collocation = true;
         }
         writeln!(self.writer, "{}", d.csv_row())?;
         Ok(())
