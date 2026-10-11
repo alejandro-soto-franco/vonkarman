@@ -17,10 +17,10 @@ num-complex = { workspace = true }
 #
 # This tracked the fork branch `pr/fma-and-opt-pipeline` until that branch was
 # deleted, which broke dependency resolution for every cargo command, optional
-# feature or not. It now points at upstream. NVlabs is moving the host crates
-# (cuda-bindings, cuda-core, cuda-async) into cutile-rs, so this target moves
-# again when that lands.
-cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa", optional = true }
+# feature or not. It now points at upstream, which moved to NVIDIA/cuda-rust.
+# bad4d055 predates the move of the host crates (cuda-bindings, cuda-core,
+# cuda-async) to the repository root; a newer rev resolves them from there.
+cuda-core = { git = "https://github.com/NVIDIA/cuda-rust", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa", optional = true }
 # Used only by the `cuda` feature, to load `cudaMemGetInfo` from libcudart for
 # the device-memory probe; same crate the FFT crate uses for cuFFT/cudart.
 libloading = { version = "0.8", optional = true }
